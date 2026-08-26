@@ -168,8 +168,8 @@ def main() -> None:
                 failed += 1
                 if failed <= 3:
                     print(f"\nFAILED {sid}:\n{msg}")
-            if done % 50 == 0:
-                print(f"  {done}/{len(jobs)}  ({failed} failed)", end="\r")
+            if done % 200 == 0:
+                print(f"  {done}/{len(jobs)}  ({failed} failed)", flush=True)
 
     print(f"\ndone: {done - failed} written, {failed} failed")
     if failed:

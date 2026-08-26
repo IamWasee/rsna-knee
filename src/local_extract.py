@@ -127,11 +127,14 @@ def generate(tok, model, reports: list[str], batch_size: int, max_new: int = 160
         for j in range(len(chunk)):
             outs.append(tok.decode(gen[j][enc["input_ids"].shape[1]:],
                                    skip_special_tokens=True))
-        print(f"  {min(i + batch_size, len(reports))}/{len(reports)}", end="\r")
-
-        # Flush to disk periodically so a timeout costs minutes, not hours.
-        if checkpoint and (i // batch_size) % 20 == 19:
-            _flush(checkpoint, outs)
+        # One line per flush, not per batch. A \r-per-batch progress line is fine
+        # in a terminal but Jupyter appends rather than overwrites, and thousands
+        # of them freeze the browser tab.
+        if (i // batch_size) % 20 == 19:
+            n = min(i + batch_size, len(reports))
+            print(f"  {n}/{len(reports)}  ({n / len(reports):.0%})", flush=True)
+            if checkpoint:
+                _flush(checkpoint, outs)
     print()
     return outs
 

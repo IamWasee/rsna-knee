@@ -52,6 +52,22 @@ def build_labels(args) -> tuple[pd.DataFrame, pd.DataFrame]:
     derived = pd.read_csv(args.labels)
     derived = derived[~derived[ID_COL].isin(gold[ID_COL])]
 
+    # A study missing from the cache silently trains on a zero-filled volume, which
+    # looks like a hard example rather than a bug. Check coverage up front.
+    cache = Path(args.cache)
+    have = {p.stem for p in cache.glob("*.npy")}
+    for name, frame in (("derived", derived), ("gold", gold)):
+        missing = (~frame[ID_COL].isin(have)).sum()
+        if missing:
+            pct = missing / len(frame)
+            print(f"WARNING: {missing}/{len(frame)} {name} studies missing from cache "
+                  f"({pct:.1%}) -- these train on zeros")
+            if pct > 0.05:
+                raise SystemExit(
+                    f"{pct:.0%} of {name} studies are uncached. Finish preprocess.py "
+                    "before training; a partial cache silently degrades every result."
+                )
+
     print(f"{len(derived)} studies with report-derived labels, {len(gold)} gold held out")
     return derived, gold
 
@@ -102,7 +118,9 @@ def train_fold(args, tr: pd.DataFrame, va: pd.DataFrame, gold: pd.DataFrame,
             scaler.update()
             sched.step()
             total += loss.item()
-            print(f"  fold{fold} ep{epoch} {i+1}/{len(tr_dl)} loss {total/(i+1):.4f}", end="\r")
+            if (i + 1) % 50 == 0:
+                print(f"  fold{fold} ep{epoch} {i+1}/{len(tr_dl)} "
+                      f"loss {total/(i+1):.4f}", flush=True)
 
         # Two scores, and only one of them is trustworthy.
         vp, vy = evaluate(model, va_dl, device)
