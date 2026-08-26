@@ -150,6 +150,11 @@ def run(args) -> None:
         print("  >>> most responses failed to parse. Check a raw output:")
         print("  " + texts[0][:400].replace("\n", "\n  "))
 
+    out = preds[LABELS].copy()
+    out.insert(0, ID_COL, todo[ID_COL].values)
+    out.to_csv(args.out, index=False)
+    print(f"wrote {args.out}: {len(out)} studies")
+
     if args.validate:
         score, per_label = macro_auc(labeled[LABELS], preds[LABELS])
         print(f"\n{'label':<18} {'AUC':>6} {'n_pos':>6}")
@@ -158,13 +163,9 @@ def run(args) -> None:
             print(f"{c:<18} {per_label[c]:>6.3f} {int(labeled[c].sum()):>6}")
         print("-" * 32)
         print(f"{'MACRO AUC':<18} {score:>6.3f}  (n={len(labeled)})")
-        print("\nCompare against the keyword baseline in report_labels.py. If this is not")
-        print("clearly ahead of it, the model or the prompt is the problem, not the task.")
-    else:
-        out = preds[LABELS].copy()
-        out.insert(0, ID_COL, todo[ID_COL].values)
-        out.to_csv(args.out, index=False)
-        print(f"wrote {args.out}: {len(out)} studies")
+        print("\nCompare against the keyword baseline, then ensemble.py -- the two")
+        print("sources fail on different labels, so combining beats either alone.")
+
 
 
 def main() -> None:
