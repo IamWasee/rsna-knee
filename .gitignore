@@ -1,0 +1,35 @@
+# Competition data — never commit (huge, and redistribution is against the rules)
+data/*
+!data/sample_submission.csv
+*.dcm
+*.nii
+*.nii.gz
+*.zip
+
+# Model weights / outputs
+weights/
+checkpoints/
+outputs/
+*.pt
+*.pth
+*.ckpt
+*.onnx
+submission.csv
+
+# Secrets
+kaggle.json
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.ipynb_checkpoints/
+.pytest_cache/
+
+# macOS
+.DS_Store
+
+# tooling state
+.claude-flow/

@@ -1,0 +1,17 @@
+# Baseline config. Values marked TODO need real data to fill in.
+data:
+  root: null          # auto-resolved by src/paths.py (Kaggle / Colab / local)
+  slices_per_series: 16   # TODO: confirm against real series depths
+  image_size: 256
+
+model:
+  backbone: resnet18      # placeholder until we see data volume/shape
+  num_labels: 12
+  pretrained: true
+
+train:
+  epochs: 5
+  batch_size: 8
+  lr: 3.0e-4
+  folds: 5
+  seed: 42
