@@ -58,8 +58,8 @@ def predict(models: list, loader: DataLoader, device: str) -> tuple[np.ndarray, 
             p = torch.stack([torch.sigmoid(m(x).float()) for m in models]).mean(0)
         preds.append(p.cpu().numpy())
         ids.extend(sid)
-        print(f"  {i+1}/{len(loader)}", end="\r")
-    print()
+        if (i + 1) % 25 == 0 or i + 1 == len(loader):
+            print(f"  {i+1}/{len(loader)}", flush=True)
     return np.concatenate(preds), ids
 
 
