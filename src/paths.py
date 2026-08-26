@@ -10,6 +10,10 @@ from pathlib import Path
 COMP = "rsna-knee-abnormality-detection"
 
 CANDIDATES = [
+    # Kaggle mounts competition data under an extra "competitions/" level when the
+    # input is attached to a notebook; the flat path is what the code-competition
+    # rerun environment uses. Check both -- confirmed 2026-08-27.
+    Path(f"/kaggle/input/competitions/{COMP}"),
     Path(f"/kaggle/input/{COMP}"),          # Kaggle notebook (code competition runtime)
     Path(f"/content/{COMP}"),               # Colab, unzipped locally
     Path(f"/content/drive/MyDrive/{COMP}"), # Colab via Drive
