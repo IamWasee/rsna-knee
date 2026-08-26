@@ -13,13 +13,20 @@ from kaggle_secrets import UserSecretsClient
 os.environ["ANTHROPIC_API_KEY"] = UserSecretsClient().get_secret("ANTHROPIC_API_KEY")
 
 # Pull the pipeline code. llm_extract.py is 300 lines -- clone it, don't paste it.
-REPO = ""   # e.g. "https://github.com/yourname/rsna-knee.git"
-if not REPO:
-    raise SystemExit("Set REPO to your GitHub repo URL first.")
-
+REPO = "github.com/IamWasee/rsna-knee.git"
 CODE = "/kaggle/working/rsna-knee"
-!rm -rf $CODE && git clone -q $REPO $CODE
+
+# Private repo? Add a GitHub token (repo scope) as a Kaggle Secret named
+# GITHUB_TOKEN. If the repo is public this is skipped automatically.
+try:
+    gh = UserSecretsClient().get_secret("GITHUB_TOKEN")
+    url = f"https://{gh}@{REPO}"
+except Exception:
+    url = f"https://{REPO}"
+
+!rm -rf $CODE && git clone -q $url $CODE
 sys.path.insert(0, f"{CODE}/src")
+print("code cloned:", os.path.isdir(f"{CODE}/src"))
 
 TRAIN = "/kaggle/input/rsna-knee-abnormality-detection/train.csv"
 
