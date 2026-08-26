@@ -28,7 +28,12 @@ except Exception:
 sys.path.insert(0, f"{CODE}/src")
 print("code cloned:", os.path.isdir(f"{CODE}/src"))
 
-TRAIN = "/kaggle/input/rsna-knee-abnormality-detection/train.csv"
+# Kaggle adds a "competitions/" level for attached competition inputs.
+import glob
+TRAIN = next(iter(glob.glob("/kaggle/input/**/train.csv", recursive=True)), None)
+if not TRAIN:
+    raise SystemExit("train.csv not found -- attach the competition under Input.")
+print("train.csv:", TRAIN)
 
 # 1. What will the full run cost?
 !python $CODE/src/llm_extract.py --data $TRAIN --estimate

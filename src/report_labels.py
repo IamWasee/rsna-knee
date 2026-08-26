@@ -97,6 +97,7 @@ def _show_errors(labeled: pd.DataFrame, preds: pd.DataFrame, n: int = 4) -> None
 # Deliberately simple. Its purpose is to establish a floor and to demonstrate that
 # negation -- not term coverage -- is what limits this task.
 
+# Osteoarthritis labels are absent here on purpose -- SIDE/OA_TERMS below handle them.
 TERMS: dict[str, list[str]] = {
     "ACL": [r"anterior cruciate", r"\bACL\b", r"ligamento cruzado anterior", r"\bLCA\b",
             r"voorste kruisband", r"vordere[sn]? kreuzband", r"ön çapraz", r"ligament croisé antérieur",
@@ -111,12 +112,6 @@ TERMS: dict[str, list[str]] = {
     "Lateral Meniscus": [r"lateral meniscus", r"menisco (externo|lateral)", r"laterale meniscus",
                          r"aussenmeniskus|außenmeniskus", r"dış menisküs", r"ménisque (latéral|externe)",
                          r"латералния менискус", r"έξω μηνίσκ", r"lateralni meniskus"],
-    "Medial OA": [r"medial compartment (degener|osteoarthr)", r"artrosis (femorotibial )?(medial|interna)",
-                  r"mediale (gonarthrose|arthrose)", r"iç kompartman", r"медиална гонартроза"],
-    "Lateral OA": [r"lateral compartment (degener|osteoarthr)", r"artrosis (femorotibial )?(lateral|externa)",
-                   r"laterale (gonarthrose|arthrose)", r"dış kompartman", r"латерална гонартроза"],
-    "PF OA": [r"patellofemoral", r"patelofemoral", r"chondromalacia", r"condromalacia",
-              r"retropatellar", r"femoropatelar", r"πατελλομηρια"],
     "Effusion": [r"effusion", r"derrame", r"erguss", r"gelenkerguss", r"efüzyon", r"épanchement",
                  r"излив", r"συλλογή", r"izliv", r"vocht in het gewricht|hydrops"],
     "Synovitis": [r"synovitis", r"sinovitis", r"synovitide", r"sinovit", r"синовит", r"υμενίτιδα",
@@ -132,34 +127,85 @@ TERMS: dict[str, list[str]] = {
 
 # Negation cues. Matching these near a term flips it. Nowhere near complete --
 # that is the point the evaluation is meant to expose.
+# Negation cues, checked within the term's own clause -- see clause() below.
 NEGATION = [
-    r"\bno\b", r"\bnot\b", r"\bnormal\b", r"\bintact\b", r"without", r"absence of",
-    r"unremarkable", r"preserved",
-    r"\bsin\b", r"no hay", r"normales?", r"íntegro", r"conservad",
-    r"\bgeen\b", r"normaal", r"intact",
-    r"\bkein", r"unauffällig", r"regelrecht",
-    r"\byok\b", r"izlenmedi", r"normal",
-    r"\bpas de\b", r"absence",
-    r"няма", r"нормал", r"интактн", r"б\.о\.",
-    r"δεν ", r"φυσιολογικ",
-    r"\bnema\b", r"uredan|uredno",
+    r"\bno\b", r"\bnot\b", r"\bnormal", r"\bintact\b", r"without", r"absence of",
+    r"unremarkable", r"preserved", r"\bnegative\b", r"rule[ds]? out", r"\bno evidence",
+    r"\bsin\b", r"no hay", r"normales?", r"íntegro", r"conservad", r"sin signos",
+    r"sin alteraciones", r"sin evidencia", r"descarta",
+    r"\bgeen\b", r"normaal", r"\bintact",
+    r"\bkein", r"unauffällig", r"regelrecht", r"\bohne\b",
+    r"\byok\b", r"izlenmedi", r"saptanmad", r"görülmedi",
+    r"\bpas de\b", r"absence", r"sans ",
+    r"няма", r"нормал", r"интактн", r"б\.о\.", r"не се",
+    r"δεν ", r"φυσιολογικ", r"ουδεμία",
+    r"\bnema\b", r"uredan|uredno", r"bez ",
 ]
 
-NEG_WINDOW = 90  # characters before a term to scan for a negation cue
+# Osteoarthritis is scored differently: an OA term plus a compartment word in the
+# same clause. The compartment is often stated once for several findings
+# ("OA femorotibial medial y lateral"), so term-adjacency alone misses most of it.
+OA_TERMS = [r"osteoarthr", r"arthrosis", r"artrosis", r"gonartros", r"gonarthros",
+            r"arthrose", r"\bOA\b", r"degener", r"chondromalac", r"condromalac",
+            r"cartilage (loss|thinning)", r"артроз", r"αρθρίτιδα", r"artroz"]
+SIDE = {
+    "Medial OA": [r"medial", r"interno", r"innen", r"\biç\b", r"médial", r"медиал",
+                  r"έσω", r"medijaln"],
+    "Lateral OA": [r"lateral", r"externo", r"aussen|außen", r"\bdış\b", r"латерал",
+                   r"έξω", r"lateraln"],
+    "PF OA": [r"patellofemoral", r"patelofemoral", r"femoropatel", r"retropatell",
+              r"patellar", r"rotula|rótula", r"trochlea", r"πατελ", r"patella"],
+}
+
+CLAUSE_SPLIT = re.compile(r"[.;:\n]|(?<=\s)\d\.\s")
+
+
+def clause(text: str, pos: int) -> str:
+    """The sentence/clause containing position `pos`.
+
+    Negation must be scoped to the clause, not a fixed character window. A window
+    reaching backwards across a sentence boundary picks up "The PCL appears intact"
+    and wrongly negates the tear described in the next sentence; a
+    backwards-only window misses Spanish, where the cue trails the term
+    ("menisco interno sin signos de desgarro").
+    """
+    starts = [0] + [m.end() for m in CLAUSE_SPLIT.finditer(text)]
+    ends = [m.start() for m in CLAUSE_SPLIT.finditer(text)] + [len(text)]
+    for a, b in zip(starts, ends):
+        if a <= pos <= b:
+            return text[a:b]
+    return text[max(0, pos - 90):pos + 90]
+
+
+def _negated(fragment: str) -> bool:
+    return any(re.search(n, fragment, flags=re.IGNORECASE) for n in NEGATION)
 
 
 def keyword_extract(report: str) -> dict[str, float]:
-    """Baseline: term hit, downweighted when a negation cue sits just before it."""
+    """Term hit, scored within its own clause so negation is read in either direction."""
     text = str(report).lower()
     out = {}
+
     for label, patterns in TERMS.items():
+        if label in SIDE:
+            continue  # handled below
         best = 0.0
         for pat in patterns:
             for m in re.finditer(pat, text, flags=re.IGNORECASE):
-                window = text[max(0, m.start() - NEG_WINDOW):m.start()]
-                negated = any(re.search(n, window, flags=re.IGNORECASE) for n in NEGATION)
-                best = max(best, 0.15 if negated else 0.85)
+                best = max(best, 0.15 if _negated(clause(text, m.start())) else 0.85)
         out[label] = best if best else 0.25
+
+    # Osteoarthritis: OA term + compartment word co-occurring in one clause.
+    for label, side_pats in SIDE.items():
+        best = 0.0
+        for pat in OA_TERMS:
+            for m in re.finditer(pat, text, flags=re.IGNORECASE):
+                frag = clause(text, m.start())
+                if not any(re.search(sp, frag, flags=re.IGNORECASE) for sp in side_pats):
+                    continue
+                best = max(best, 0.15 if _negated(frag) else 0.85)
+        out[label] = best if best else 0.25
+
     return out
 
 
