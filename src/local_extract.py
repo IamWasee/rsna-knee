@@ -103,7 +103,8 @@ def parse_scores(text: str) -> dict[str, float]:
     return dict(NEUTRAL)
 
 
-def generate(tok, model, reports: list[str], batch_size: int, max_new: int = 200):
+def generate(tok, model, reports: list[str], batch_size: int, max_new: int = 160,
+             checkpoint=None):
     """Batched greedy decoding. Greedy because we want the same answer every run."""
     import torch
 
@@ -127,8 +128,22 @@ def generate(tok, model, reports: list[str], batch_size: int, max_new: int = 200
             outs.append(tok.decode(gen[j][enc["input_ids"].shape[1]:],
                                    skip_special_tokens=True))
         print(f"  {min(i + batch_size, len(reports))}/{len(reports)}", end="\r")
+
+        # Flush to disk periodically so a timeout costs minutes, not hours.
+        if checkpoint and (i // batch_size) % 20 == 19:
+            _flush(checkpoint, outs)
     print()
     return outs
+
+
+def _flush(checkpoint, outs: list[str]) -> None:
+    args, todo, done = checkpoint
+    rows = dict(done)
+    for sid, text in zip(todo[ID_COL].iloc[:len(outs)], outs):
+        rows[sid] = parse_scores(text)
+    df = pd.DataFrame.from_dict(rows, orient="index").reindex(columns=LABELS)
+    df.index.name = ID_COL
+    df.reset_index().to_csv(args.out, index=False)
 
 
 def run(args) -> None:
@@ -137,25 +152,46 @@ def run(args) -> None:
     train = pd.read_csv(args.data)
     labeled = train[train[LABELS].notna().all(axis=1)]
     todo = labeled if args.validate else train[train[LABELS].isna().all(axis=1)]
+
+    # Resume. The full run is 4,349 reports -- several hours against a 9-hour
+    # session cap -- so losing everything to a timeout is a real failure mode,
+    # not a hypothetical one.
+    done: dict[str, dict] = {}
+    if args.out.exists():
+        prev = pd.read_csv(args.out).set_index(ID_COL)
+        done = {i: r.to_dict() for i, r in prev.iterrows()}
+        todo = todo[~todo[ID_COL].isin(done)]
+        print(f"resuming: {len(done)} already done, {len(todo)} remaining")
+
     print(f"{len(todo)} reports, model={args.model}, batch={args.batch}")
 
-    tok, model = load_model(args.model, args.four_bit)
-    texts = generate(tok, model, list(todo["Report"].astype(str)), args.batch)
-    preds = pd.DataFrame([parse_scores(t) for t in texts], index=todo.index)
+    if todo.empty:
+        print("nothing left to do -- rescoring the cached predictions")
+        preds = pd.DataFrame(columns=LABELS)
+    else:
+        tok, model = load_model(args.model, args.four_bit)
+        texts = generate(tok, model, list(todo["Report"].astype(str)), args.batch,
+                         max_new=args.max_new, checkpoint=(args, todo, done))
+        preds = pd.DataFrame([parse_scores(t) for t in texts], index=todo.index)
 
-    # A high neutral rate means the model is not answering, not that it is unsure.
-    neutral = (preds[LABELS] == 0.5).all(axis=1).mean()
-    print(f"unparseable responses: {neutral:.1%}")
-    if neutral > 0.3:
-        print("  >>> most responses failed to parse. Check a raw output:")
-        print("  " + texts[0][:400].replace("\n", "\n  "))
+        # A high neutral rate means the model is not answering, not that it is unsure.
+        neutral = (preds[LABELS] == 0.5).all(axis=1).mean()
+        print(f"unparseable responses: {neutral:.1%}")
+        if neutral > 0.3:
+            print("  >>> most responses failed to parse. Check a raw output:")
+            print("  " + texts[0][:400].replace("\n", "\n  "))
 
-    out = preds[LABELS].copy()
-    out.insert(0, ID_COL, todo[ID_COL].values)
-    out.to_csv(args.out, index=False)
+    rows = dict(done)
+    for sid, row in zip(todo[ID_COL], preds.to_dict("records")):
+        rows[sid] = row
+    out = pd.DataFrame.from_dict(rows, orient="index").reindex(columns=LABELS)
+    out.index.name = ID_COL
+    out.reset_index().to_csv(args.out, index=False)
     print(f"wrote {args.out}: {len(out)} studies")
 
     if args.validate:
+        preds = out.reindex(labeled[ID_COL]).reset_index(drop=True)
+        preds.index = labeled.index
         score, per_label = macro_auc(labeled[LABELS], preds[LABELS])
         print(f"\n{'label':<18} {'AUC':>6} {'n_pos':>6}")
         print("-" * 32)
@@ -175,6 +211,8 @@ def main() -> None:
     ap.add_argument("--batch", type=int, default=8)
     ap.add_argument("--four-bit", action="store_true", help="4-bit quantisation, for 16GB GPUs")
     ap.add_argument("--out", type=Path, default=Path("report_labels.csv"))
+    ap.add_argument("--max-new", type=int, default=160,
+                    help="output is a 12-number JSON; 160 is ample and faster than 200")
     ap.add_argument("--validate", action="store_true", help="58 gold studies only")
     run(ap.parse_args())
 
