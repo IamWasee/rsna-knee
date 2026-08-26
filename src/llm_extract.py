@@ -134,6 +134,24 @@ def _parse(message) -> dict[str, float]:
 # --------------------------------------------------------------------------
 # Sync path -- for validating against the 58 gold studies
 # --------------------------------------------------------------------------
+class Fatal(RuntimeError):
+    """An error that retrying cannot fix -- no credit, bad key, no access."""
+
+
+def _fatal_if_hopeless(e: Exception) -> None:
+    """Billing and auth failures repeat identically for every report. Stop at the first."""
+    import anthropic
+
+    if isinstance(e, (anthropic.AuthenticationError, anthropic.PermissionDeniedError)):
+        raise Fatal(f"credentials rejected: {e}") from e
+    if isinstance(e, anthropic.BadRequestError) and "credit balance" in str(e):
+        raise Fatal(
+            "Anthropic account is out of credits.\n"
+            "  Add credits at console.anthropic.com -> Plans & Billing, then re-run.\n"
+            "  Nothing was charged and no progress was lost."
+        ) from e
+
+
 def extract_one(client, report: str, effort: str = "medium") -> dict[str, float]:
     msg = client.messages.create(**_params(report, effort))
     if msg.stop_reason == "refusal":
@@ -150,6 +168,7 @@ def validate(client, train: pd.DataFrame, effort: str, out: Path | None) -> None
         print(f"resuming: {len(cache)} cached")
 
     labeled = train[train[LABELS].notna().all(axis=1)]
+    fails = 0
     fh = out.open("a") if out else None
     for i, (_, row) in enumerate(labeled.iterrows(), 1):
         sid = row[ID_COL]
@@ -158,7 +177,11 @@ def validate(client, train: pd.DataFrame, effort: str, out: Path | None) -> None
         try:
             pred = extract_one(client, row["Report"], effort)
         except Exception as e:
-            print(f"  [{i}/{len(labeled)}] FAILED: {e}")
+            _fatal_if_hopeless(e)
+            fails += 1
+            print(f"  [{i}/{len(labeled)}] failed: {str(e)[:120]}")
+            if fails >= 5 and not cache:
+                raise Fatal(f"{fails} failures, nothing succeeded -- stopping") from e
             continue
         cache[sid] = pred
         if fh:
@@ -168,6 +191,10 @@ def validate(client, train: pd.DataFrame, effort: str, out: Path | None) -> None
     if fh:
         fh.close()
 
+    if not cache:
+        print("\nNo extractions succeeded -- nothing to score.")
+        return
+    print(f"\nextracted {len(cache)}/{len(labeled)}")
     preds = pd.DataFrame([cache.get(s, {}) for s in labeled[ID_COL]], index=labeled.index)
     _report(labeled, preds)
 
@@ -249,11 +276,15 @@ def estimate(client, train: pd.DataFrame, effort: str) -> None:
     """Price the full run before committing to it."""
     todo = train[train[LABELS].isna().all(axis=1)]
     sample = todo["Report"].iloc[0]
-    n = client.messages.count_tokens(
-        model=MODEL,
-        system=SYSTEM,
-        messages=[{"role": "user", "content": f"<report>\n{sample}\n</report>"}],
-    ).input_tokens
+    try:
+        n = client.messages.count_tokens(
+            model=MODEL,
+            system=SYSTEM,
+            messages=[{"role": "user", "content": f"<report>\n{sample}\n</report>"}],
+        ).input_tokens
+    except Exception as e:
+        _fatal_if_hopeless(e)
+        raise
 
     sys_tokens = client.messages.count_tokens(
         model=MODEL, system=SYSTEM, messages=[{"role": "user", "content": "x"}]
@@ -293,15 +324,20 @@ def main() -> None:
     client = anthropic.Anthropic()
     train = pd.read_csv(args.data)
 
-    if args.estimate:
-        estimate(client, train, args.effort)
-    elif args.validate:
-        validate(client, train, args.effort, Path("validate_cache.jsonl"))
-    elif args.all:
-        run_all(client, train, args.effort, args.out)
-    else:
-        todo = train[train[LABELS].isna().all(axis=1)]
-        collect(client, args.collect, todo, args.out)
+    try:
+        if args.estimate:
+            estimate(client, train, args.effort)
+        elif args.validate:
+            validate(client, train, args.effort, Path("validate_cache.jsonl"))
+        elif args.all:
+            run_all(client, train, args.effort, args.out)
+        else:
+            todo = train[train[LABELS].isna().all(axis=1)]
+            collect(client, args.collect, todo, args.out)
+    except Fatal as e:
+        # A stack trace adds nothing here -- the message is the whole story.
+        print(f"\nSTOPPED: {e}", file=sys.stderr)
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":
