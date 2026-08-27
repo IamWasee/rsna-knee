@@ -103,8 +103,11 @@ if not found or not WEIGHTS:
         "Output tab shows weights/fold0.pt .. fold4.pt AND rsna-knee/src/."
     )
 
-CODE = str(Path(found[0]).parents[1])
-sys.path.insert(0, f"{CODE}/src")
+# Derive the source directory from where infer.py actually is. It may sit in a
+# repo checkout (rsna-knee/src/) or flat in a dataset folder (rsna_knee_src/), and
+# assuming the former looked for weights/src/preprocess.py and found nothing.
+SRC = os.path.dirname(found[0])
+sys.path.insert(0, SRC)
 
 # Collect every checkpoint into one flat directory. A dataset upload can nest each
 # file in its own folder, and taking the parent of the first .pt would then point
@@ -116,7 +119,7 @@ os.makedirs(WDIR, exist_ok=True)
 for w in WEIGHTS:
     shutil.copy(w, os.path.join(WDIR, os.path.basename(w)))
 
-print(f"code:    {CODE}")
+print(f"src:     {SRC}")
 print(f"weights: {WDIR}  ({len(WEIGHTS)} folds)")
 for w in WEIGHTS:
     print(f"   {w}")
@@ -125,13 +128,15 @@ CACHE = "/kaggle/working/test_cache"
 
 # 1. Preprocess the hidden test set. Measured at 2.73 studies/sec with 4 workers,
 #    so even 20,000 studies is ~2h of the 9h budget.
-!python $CODE/src/preprocess.py --out $CACHE --split test --workers 4
+!python $SRC/preprocess.py --out $CACHE --split test --workers 4
 print(f"preprocess: {(time.time()-t0)/60:.1f} min")
 
 # 2. Predict and write submission.csv at the path Kaggle expects.
-!python $CODE/src/infer.py --cache $CACHE --weights $WDIR --out /kaggle/working/submission.csv
+!python $SRC/infer.py --cache $CACHE --weights $WDIR --out /kaggle/working/submission.csv
 
 import pandas as pd
+if not os.path.exists("/kaggle/working/submission.csv"):
+    raise SystemExit("infer.py did not produce submission.csv -- see the error above.")
 sub = pd.read_csv("/kaggle/working/submission.csv")
 print(sub.shape)
 print(sub.head())
