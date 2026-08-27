@@ -119,14 +119,35 @@ def generate(tok, model, reports: list[str], batch_size: int, max_new: int = 160
             )
             for r in chunk
         ]
-        enc = tok(prompts, return_tensors="pt", padding=True,
-                  truncation=True, max_length=3072).to(model.device)
-        with torch.no_grad():
-            gen = model.generate(**enc, max_new_tokens=max_new, do_sample=False,
-                                 pad_token_id=tok.pad_token_id)
-        for j in range(len(chunk)):
-            outs.append(tok.decode(gen[j][enc["input_ids"].shape[1]:],
-                                   skip_special_tokens=True))
+        # Memory scales with batch x longest report in the batch, so a batch that
+        # ran fine for hours can still OOM on a chunk of long reports. Halve and
+        # retry rather than losing the run -- this cost 4 hours once already.
+        sub = chunk
+        step = len(chunk)
+        j0 = 0
+        while j0 < len(chunk):
+            sub = chunk[j0:j0 + step]
+            try:
+                enc = tok(prompts[j0:j0 + step], return_tensors="pt", padding=True,
+                          truncation=True, max_length=3072).to(model.device)
+                with torch.no_grad():
+                    gen = model.generate(**enc, max_new_tokens=max_new, do_sample=False,
+                                         pad_token_id=tok.pad_token_id)
+            except torch.cuda.OutOfMemoryError:
+                torch.cuda.empty_cache()
+                if step == 1:
+                    print(f"  OOM on a single report -- skipping it", flush=True)
+                    outs.append("")
+                    j0 += 1
+                    step = len(chunk)
+                    continue
+                step = max(1, step // 2)
+                print(f"  OOM -- retrying at sub-batch {step}", flush=True)
+                continue
+            for j in range(len(sub)):
+                outs.append(tok.decode(gen[j][enc["input_ids"].shape[1]:],
+                                       skip_special_tokens=True))
+            j0 += step
         # One line per flush, not per batch. A \r-per-batch progress line is fine
         # in a terminal but Jupyter appends rather than overwrites, and thousands
         # of them freeze the browser tab.

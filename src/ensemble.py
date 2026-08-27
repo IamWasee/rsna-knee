@@ -55,12 +55,44 @@ def score(name: str, truth: pd.DataFrame, preds: pd.DataFrame, per_label: bool =
     return s
 
 
+def _diagnose(kw: pd.DataFrame, ml: pd.DataFrame) -> None:
+    """Per-source positive rates, before combining.
+
+    The ensemble output is a blend and can hide a broken source. Comparing each
+    source separately against the gold prevalence is what identifies which one is
+    wrong -- and whether the disagreement is real or an artifact of the combiner.
+    """
+    from config import GOLD_PREVALENCE
+
+    print(f"\n{'label':<18} {'gold':>6} {'keyword':>8} {'model':>7} {'flag':>6}")
+    print("-" * 50)
+    for c in LABELS:
+        g = GOLD_PREVALENCE[c]
+        k = (kw[c] > 0.5).mean()
+        m = (ml[c] > 0.5).mean()
+        # 3x off the gold base rate is not sampling noise at n=3500.
+        flag = ""
+        if not (g / 3 < k < min(1.0, g * 3)):
+            flag += "K"
+        if not (g / 3 < m < min(1.0, g * 3)):
+            flag += "M"
+        print(f"{c:<18} {g:>6.3f} {k:>8.3f} {m:>7.3f} {flag:>6}")
+    print("-" * 50)
+    print("K = keyword far off gold base rate, M = model far off. Neither is proof")
+    print("of a bug -- gold is 58 studies -- but a 3x gap is worth reading reports for.")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--data", type=Path, required=True, help="train.csv")
     ap.add_argument("--model-preds", type=Path, required=True,
                     help="CSV written by local_extract.py (or llm_extract.py)")
     ap.add_argument("--out", type=Path, help="write combined predictions here")
+    ap.add_argument("--method", default="mean", choices=["mean", "rank_mean", "max"],
+                    help="mean keeps a probability scale, which training targets need; "
+                         "rank_mean scored marginally higher but its output is a rank, "
+                         "not a probability, so prevalence checks are meaningless on it")
+    ap.add_argument("--weight", type=float, default=0.5, help="weight on the model source")
     ap.add_argument("--per-label", action="store_true")
     args = ap.parse_args()
 
@@ -75,16 +107,19 @@ def main() -> None:
     labeled = subset[subset[LABELS].notna().all(axis=1)]
     if labeled.empty:
         # Unlabeled split: nothing to score, just write the combination.
-        out = combine(kw, ml, "rank_mean").reset_index()
+        _diagnose(kw, ml)
+        out = combine(kw, ml, args.method, args.weight).reset_index()
         out.to_csv(args.out or "ensemble_preds.csv", index=False)
-        print(f"wrote {args.out or 'ensemble_preds.csv'}: {len(out)} studies (unscored)")
+        print(f"\nwrote {args.out or 'ensemble_preds.csv'}: {len(out)} studies "
+              f"({args.method} w={args.weight}, unscored)")
         return
 
     truth = labeled[LABELS]
     idx = labeled[ID_COL]
     k, m = kw.loc[idx], ml.loc[idx]
 
-    print(f"scored on {len(labeled)} gold studies\n")
+    _diagnose(kw, ml)
+    print(f"\nscored on {len(labeled)} gold studies\n")
     score("keyword alone", truth, k.set_index(truth.index))
     score("model alone", truth, m.set_index(truth.index))
     print()
