@@ -35,35 +35,49 @@ print("all required packages preinstalled")
 # os.walk with pruning, not glob(recursive=True): the latter descends the whole
 # competition dataset -- hundreds of thousands of DICOM files -- and measured 421
 # seconds. Pruning that one directory keeps it complete and fast.
-def find(filename: str, suffix: str = "") -> list[str]:
+def find(filename: str = "", suffix: str = "") -> list[str]:
+    """Locate files in the attached inputs without descending the DICOM archive.
+
+    followlinks=True matters: Kaggle mounts notebook outputs as symlinks and
+    os.walk does not follow them by default, so the default silently finds nothing
+    where a recursive glob succeeds. Falls back to that glob if the walk comes up
+    empty, since being slow beats failing a submission.
+    """
     hits = []
-    for root, dirs, files in os.walk("/kaggle/input"):
+    for root, dirs, files in os.walk("/kaggle/input", followlinks=True):
         dirs[:] = [d for d in dirs
                    if "rsna-knee-abnormality-detection" not in os.path.join(root, d)]
         for f in files:
-            if (f == filename) or (suffix and f.endswith(suffix)):
+            if (filename and f == filename) or (suffix and f.endswith(suffix)):
                 hits.append(os.path.join(root, f))
+    if not hits:
+        pat = filename or f"*{suffix}"
+        hits = [f for f in glob.glob(f"/kaggle/input/**/{pat}", recursive=True)
+                if "rsna-knee-abnormality-detection" not in f]
     return sorted(hits)
 
 
-found = find("infer.py")
-WEIGHTS = find("", ".pt")
+found = find(filename="infer.py")
+WEIGHTS = find(suffix=".pt")
 
 if not found or not WEIGHTS:
     print("WHAT IS ACTUALLY ATTACHED:")
-    for root, dirs, files in os.walk("/kaggle/input"):
+    for root, dirs, files in os.walk("/kaggle/input", followlinks=True):
+        if "rsna-knee-abnormality-detection" in root:
+            dirs[:] = []
+            continue
         depth = root.count(os.sep) - 2
-        if depth > 3 or "rsna-knee-abnormality-detection" in root:
+        if depth > 5:
             dirs[:] = []
             continue
         print("  " * depth + os.path.basename(root) + "/")
-        for f in files[:5]:
+        for f in files[:6]:
             print("  " * (depth + 1) + f)
     raise SystemExit(
         f"missing: {'src/infer.py ' if not found else ''}"
         f"{'checkpoints' if not WEIGHTS else ''}\n"
-        "Attach: Notebook Output -> your 5-fold TRAINING notebook. Its output holds\n"
-        "both weights/*.pt and the cloned rsna-knee/src/."
+        "Attach: Notebook Output -> the 5-fold TRAINING notebook version whose\n"
+        "Output tab shows weights/fold0.pt .. fold4.pt AND rsna-knee/src/."
     )
 
 CODE = str(Path(found[0]).parents[1])
