@@ -157,6 +157,35 @@ SIDE = {
               r"patellar", r"rotula|rótula", r"trochlea", r"πατελ", r"patella"],
 }
 
+# Severity qualifiers. The annotated labels apply a threshold the reports do not:
+# "Begleitend geringer Gelenkerguss" -- accompanying slight joint effusion -- is
+# stated plainly and annotated Effusion=0. Scoring every mention at 0.85 therefore
+# mismatches on every mild finding in the corpus. Graded scores also rank better,
+# and AUC reads order.
+MILD = [
+    r"\bmild", r"\bminimal", r"\bsmall\b", r"\bslight", r"\btrace\b", r"\btiny\b",
+    r"\bsubtle", r"low[- ]grade", r"grade [12]\b", r"\bearly\b",
+    r"\bleve\b", r"m[ií]nim", r"peque[nñ]", r"escas", r"discret", r"ligera",
+    r"\bgering", r"\bleicht", r"\bklein", r"diskret",
+    r"\blicht", r"\bgeringe",
+    r"\bhafif", r"\baz\b", r"minimal",
+    r"\bfaible", r"\bl[ée]ger", r"\bpetit", r"discr[eè]t",
+    r"минимал", r"\bлек", r"малък", r"незначител",
+    r"ήπι", r"μικρ", r"ελαφρ",
+    r"\bblag", r"\bmal[ia]\b", r"neznatn",
+]
+SEVERE = [
+    r"\bsevere", r"\bmarked", r"\blarge\b", r"\bextensive", r"\bcomplete",
+    r"\bfull[- ]thickness", r"high[- ]grade", r"grade [34]\b", r"\bgross\b",
+    r"\bsever[oa]", r"\bgrande", r"\bimportante", r"\bmarcad", r"\bcomplet",
+    r"\bausgepr[aä]gt", r"\bdeutlich", r"\bgro[sß]", r"\bvollst[aä]ndig",
+    r"\bciddi", r"\bileri", r"\bb[uü]y[uü]k",
+    r"\bs[ée]v[eè]re", r"\bimportant", r"\bcomplet",
+    r"изразен", r"тежк", r"пълн",
+    r"σοβαρ", r"μεγάλ", r"πλήρ",
+    r"\bteži", r"\bveliki", r"\bpotpun",
+]
+
 CLAUSE_SPLIT = re.compile(r"[.;:\n]|(?<=\s)\d\.\s")
 
 
@@ -181,6 +210,19 @@ def _negated(fragment: str) -> bool:
     return any(re.search(n, fragment, flags=re.IGNORECASE) for n in NEGATION)
 
 
+def _grade(fragment: str) -> float:
+    """Score a present finding by how emphatically the report states it.
+
+    0.55 for mild -- annotators frequently threshold these to negative -- 0.95 for
+    severe, 0.85 for an unqualified mention.
+    """
+    if any(re.search(m, fragment, flags=re.IGNORECASE) for m in MILD):
+        return 0.55
+    if any(re.search(v, fragment, flags=re.IGNORECASE) for v in SEVERE):
+        return 0.95
+    return 0.85
+
+
 def keyword_extract(report: str) -> dict[str, float]:
     """Term hit, scored within its own clause so negation is read in either direction."""
     text = str(report).lower()
@@ -192,7 +234,8 @@ def keyword_extract(report: str) -> dict[str, float]:
         best = 0.0
         for pat in patterns:
             for m in re.finditer(pat, text, flags=re.IGNORECASE):
-                best = max(best, 0.15 if _negated(clause(text, m.start())) else 0.85)
+                frag = clause(text, m.start())
+                best = max(best, 0.15 if _negated(frag) else _grade(frag))
         out[label] = best if best else 0.25
 
     # Osteoarthritis: OA term + compartment word co-occurring in one clause.
@@ -203,7 +246,7 @@ def keyword_extract(report: str) -> dict[str, float]:
                 frag = clause(text, m.start())
                 if not any(re.search(sp, frag, flags=re.IGNORECASE) for sp in side_pats):
                     continue
-                best = max(best, 0.15 if _negated(frag) else 0.85)
+                best = max(best, 0.15 if _negated(frag) else _grade(frag))
         out[label] = best if best else 0.25
 
     return out
