@@ -118,7 +118,7 @@ def evaluate(model, loader, device) -> tuple[np.ndarray, np.ndarray]:
 
 def train_fold(args, tr: pd.DataFrame, va: pd.DataFrame, gold: pd.DataFrame,
                fold: int, device: str) -> float:
-    ds_kw = dict(cache=args.cache, n_series=args.n_series,
+    ds_kw = dict(cache=args.cache, slots=args.slots,
                  n_slices=args.n_slices, size=args.size)
     dl_kw = dict(num_workers=args.workers, pin_memory=(device == "cuda"))
 
@@ -185,9 +185,9 @@ def main() -> None:
     ap.add_argument("--batch", type=int, default=4)
     ap.add_argument("--lr", type=float, default=3e-4)
     ap.add_argument("--workers", type=int, default=2)
-    ap.add_argument("--n-series", type=int, default=3)
-    ap.add_argument("--n-slices", type=int, default=12)
-    ap.add_argument("--size", type=int, default=224)
+    ap.add_argument("--slots", type=int, default=4)
+    ap.add_argument("--n-slices", type=int, default=9)
+    ap.add_argument("--size", type=int, default=256)
     ap.add_argument("--no-pretrained", dest="pretrained", action="store_false")
     ap.add_argument("--no-sharpen", dest="sharpen", action="store_false",
                     help="train on raw ensemble scores (compressed toward 0.5)")

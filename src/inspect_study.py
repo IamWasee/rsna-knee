@@ -74,8 +74,8 @@ def main() -> None:
     print(f"loaded {len(models)} checkpoint(s), backbone {cfg['backbone']}\n")
 
     ds = KneeStudies(gold, cache=args.cache, train=False,
-                     n_series=cfg.get("n_series", 3), n_slices=cfg.get("n_slices", 12),
-                     size=cfg.get("size", 224))
+                     slots=cfg.get("slots", 4), n_slices=cfg.get("n_slices", 9),
+                     size=cfg.get("size", 256))
 
     # Predict on all 58 so "worst" is meaningful.
     preds, attns = [], []
@@ -113,23 +113,25 @@ def main() -> None:
 
         # Which slices drove it -- attention is over series*slices, in cache order.
         a = attns[idx]
-        n_sl = cfg.get("n_slices", 12)
         top = np.argsort(-a)[:5]
-        print("\nslices the model weighted most (series, slice):")
+        planes = ["Sag-FS", "Cor-FS", "Ax-FS", "Sag-T1"]
+        print("\ntriplets the model weighted most:")
         for k in top:
-            print(f"   series {k // n_sl}  slice {k % n_sl:>2}   weight {a[k]:.3f}")
+            slot, grp = k // 3, k % 3
+            name = planes[slot] if slot < len(planes) else f"slot{slot}"
+            print(f"   {name:<7} anchor {grp}   weight {a[k]:.3f}")
 
         print("\n--- what the radiologist wrote ---")
         print(str(row["Report"])[:900])
         print()
 
         if args.figdir:
-            out = _plot(args.cache, row[ID_COL], a, n_sl, Path(args.figdir), int(idx))
+            out = _plot(args.cache, row[ID_COL], a, Path(args.figdir), int(idx))
             if out:
                 print(f"[image saved: {out}]\n")
 
 
-def _plot(cache: Path, study_id: str, attn: np.ndarray, n_slices: int,
+def _plot(cache: Path, study_id: str, attn: np.ndarray,
           figdir: Path, tag: int) -> Path | None:
     """Save to PNG rather than show().
 
@@ -144,13 +146,15 @@ def _plot(cache: Path, study_id: str, attn: np.ndarray, n_slices: int,
     path = Path(cache) / f"{study_id}.npy"
     if not path.exists():
         return None
-    vol = np.load(path)
+    vol = np.load(path)                       # (slots, 9, H, W)
+    planes = ["Sag-FS", "Cor-FS", "Ax-FS", "Sag-T1"]
     top = np.argsort(-attn)[:6]
     fig, ax = plt.subplots(1, len(top), figsize=(3 * len(top), 3.4))
     for i, k in enumerate(top):
-        s, sl = k // n_slices, k % n_slices
-        ax[i].imshow(vol[s, sl], cmap="gray")
-        ax[i].set_title(f"series {s} slice {sl}\nweight {attn[k]:.3f}", fontsize=9)
+        slot, grp = k // 3, k % 3
+        ax[i].imshow(vol[slot, grp * 3 + 1], cmap="gray")   # middle of the triplet
+        name = planes[slot] if slot < len(planes) else f"slot{slot}"
+        ax[i].set_title(f"{name} anchor {grp}\nweight {attn[k]:.3f}", fontsize=9)
         ax[i].axis("off")
     fig.suptitle(f"study {study_id[-16:]} -- the six slices the model weighted most",
                  fontsize=11)

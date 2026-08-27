@@ -81,9 +81,9 @@ def main() -> None:
     models, cfg = load_models(args.weights, device)
 
     ds = KneeStudies(test, cache=args.cache, train=False,
-                     n_series=cfg.get("n_series", 3),
-                     n_slices=cfg.get("n_slices", 12),
-                     size=cfg.get("size", 224))
+                     slots=cfg.get("slots", 4),
+                     n_slices=cfg.get("n_slices", 9),
+                     size=cfg.get("size", 256))
     loader = DataLoader(ds, batch_size=args.batch, num_workers=args.workers)
 
     preds, ids = predict(models, loader, device)

@@ -1,16 +1,25 @@
 """Build a compact image cache from the DICOM archive. Run once, reuse forever.
 
-The imaging is roughly 0.9-1.8 TB across 24,371 series. Kaggle's writable working
-directory holds ~19.5 GB, so caching everything is impossible and re-reading DICOM
-every epoch is far too slow. This selects a few informative series per study, takes
-a handful of slices from each, downsizes to uint8, and writes one .npy per study.
+Three things here are not obvious and all three were measured by other competitors
+before being adopted:
 
-At the defaults (3 series x 12 slices x 224px) that is ~1.8 MB per study and about
-8 GB total -- small enough to save as a Kaggle Dataset and attach to every later
-training run, so this cost is paid once rather than per experiment.
+1. Slice order comes from geometry, never filenames. The filenames are SOP Instance
+   UIDs -- unique, not ordered -- and sorted filename order matches true anatomical
+   order about 5% of the time on this corpus. Slices are sorted by projecting
+   ImagePositionPatient onto the slice normal from ImageOrientationPatient.
+
+2. The crop is in millimetres, not pixels. Field of view spans 71 distinct values
+   with a median of 160 mm, so resizing whole frames to a fixed pixel size leaves
+   every study at a different physical scale. A 1-3 mm meniscal tear can disappear
+   before the first convolution. Cropping to a fixed physical extent first fixes it.
+
+3. Slices come in adjacent triplets, not evenly spread. Three anchors across the
+   joint, three physically adjacent slices at each, so every triplet is a real
+   ~10 mm depth neighbourhood rather than a slab of unrelated views. Measured at
+   +0.018 macro AUC over evenly-spaced sampling.
 
     python src/preprocess.py --out /kaggle/working/cache --workers 4
-    python src/preprocess.py --out cache --split test      # for the submission notebook
+    python src/preprocess.py --out cache --split test
 """
 
 from __future__ import annotations
@@ -28,103 +37,144 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from config import ID_COL, SERIES_COL  # noqa: E402
 from paths import data_root  # noqa: E402
 
-# Which series to keep, in priority order. Each slot is (plane, fluid_sensitive).
-#
-# Rationale, from how knees are read rather than from anything measured here:
-#   sagittal fluid-sensitive  -- cruciates, meniscal tears, bone marrow oedema
-#   coronal fluid-sensitive   -- collateral ligaments, meniscal body, compartment OA
-#   axial fluid-sensitive     -- patellofemoral cartilage, effusion, synovitis
-# Fluid-sensitive sequences are chosen first because 7 of the 12 labels are
-# oedema-, fluid-, or inflammation-related.
+# Sequence slots, in priority order: (plane, fluid_sensitive).
+# Fluid_Sensitive and Fat_Suppression are identical columns in this dataset, so
+# fluid_sensitive=1 is the fat-suppressed fluid-sensitive sequence and 0 is the
+# anatomical (T1/PD) one. Seven of the twelve labels are fluid, oedema or
+# inflammation findings, so fluid-sensitive planes come first.
 SLOTS = [
-    ("Sagittal", 1), ("Coronal", 1), ("Axial", 1),
-    ("Sagittal", 0), ("Coronal", 0), ("Axial", 0),
+    ("Sagittal", 1), ("Coronal", 1), ("Axial", 1), ("Sagittal", 0),
 ]
 
+N_ANCHORS = 3      # anchor positions across the joint
+GROUP = 3          # physically adjacent slices per anchor -> N_ANCHORS*GROUP total
+CROP_MM = 140.0    # physical field kept before resizing
 
-def pick_series(series: pd.DataFrame, n_series: int) -> list[str]:
-    """Choose up to n_series, spreading across planes before doubling up on one."""
+
+def pick_series(series: pd.DataFrame, n_slots: int) -> list[str]:
+    """One series per slot, falling back to whatever the study actually has."""
     chosen: list[str] = []
-    for plane, fluid in SLOTS:
-        if len(chosen) >= n_series:
-            break
-        match = series[(series["Anatomical_Plane"] == plane)
-                       & (series["Fluid_Sensitive"] == fluid)]
-        if not match.empty:
-            chosen.append(match.iloc[0][SERIES_COL])
-    # Fall back to whatever exists if the study lacks the usual planes.
-    for sid in series[SERIES_COL]:
-        if len(chosen) >= n_series:
-            break
-        if sid not in chosen:
-            chosen.append(sid)
-    return chosen[:n_series]
+    for plane, fluid in SLOTS[:n_slots]:
+        m = series[(series["Anatomical_Plane"] == plane)
+                   & (series["Fluid_Sensitive"] == fluid)]
+        chosen.append(m.iloc[0][SERIES_COL] if not m.empty else None)
+
+    spare = [s for s in series[SERIES_COL] if s not in chosen]
+    for i, c in enumerate(chosen):
+        if c is None and spare:
+            chosen[i] = spare.pop(0)
+    return [c for c in chosen if c is not None][:n_slots]
 
 
-def load_slices(series_dir: Path, n_slices: int, size: int) -> np.ndarray:
-    """Evenly-spaced slices from the middle of a series, as uint8.
+def sort_by_position(files: list[Path], pydicom) -> list[Path]:
+    """Order slices anatomically, by geometry.
 
-    Slices are ordered by InstanceNumber where present -- directory order is not
-    anatomical order. The outer slices of a knee series are mostly soft tissue and
-    air, so sampling is biased toward the middle 80%.
+    Projecting the slice origin onto the normal of the imaging plane gives a true
+    physical coordinate along the stack axis. Falls back through SliceLocation and
+    InstanceNumber; filename order is the last resort and is close to random here.
     """
-    import pydicom
-
-    files = sorted(series_dir.glob("*.dcm"))
-    if not files:
-        return np.zeros((n_slices, size, size), dtype=np.uint8)
-
-    # Sort by InstanceNumber, reading headers only (cheap -- no pixel decode).
-    def order(f: Path) -> float:
+    keyed = []
+    for f in files:
+        k = None
         try:
             ds = pydicom.dcmread(str(f), stop_before_pixels=True)
-            return float(getattr(ds, "InstanceNumber", 0) or 0)
+            iop = getattr(ds, "ImageOrientationPatient", None)
+            ipp = getattr(ds, "ImagePositionPatient", None)
+            if iop is not None and ipp is not None and len(iop) == 6:
+                normal = np.cross(np.array(iop[:3], float), np.array(iop[3:], float))
+                k = float(np.dot(np.array(ipp, float), normal))
+            elif getattr(ds, "SliceLocation", None) is not None:
+                k = float(ds.SliceLocation)
+            elif getattr(ds, "InstanceNumber", None) is not None:
+                k = float(ds.InstanceNumber)
         except Exception:
-            return 0.0
+            pass
+        keyed.append((k if k is not None else float("inf"), f.name, f))
+    keyed.sort(key=lambda t: (t[0], t[1]))
+    return [t[2] for t in keyed]
 
-    files = sorted(files, key=order)
 
-    lo, hi = int(len(files) * 0.1), int(np.ceil(len(files) * 0.9))
-    core = files[lo:hi] or files
-    idx = np.linspace(0, len(core) - 1, n_slices).round().astype(int)
-
-    out = np.zeros((n_slices, size, size), dtype=np.uint8)
-    for k, i in enumerate(idx):
+def pixel_spacing(ds) -> float:
+    ps = getattr(ds, "PixelSpacing", None)
+    if ps is not None and len(ps) >= 1:
         try:
-            arr = pydicom.dcmread(str(core[i])).pixel_array.astype(np.float32)
-        except Exception:
-            continue
-        out[k] = normalise(arr, size)
-    return out
+            return float(ps[0])
+        except (TypeError, ValueError):
+            pass
+    return 0.0
 
 
-def normalise(arr: np.ndarray, size: int) -> np.ndarray:
-    """Percentile-clip, scale to 0-255, resize.
+def crop_resize(arr: np.ndarray, spacing: float, size: int, crop_mm: float) -> np.ndarray:
+    """Percentile-normalise, crop to a fixed physical extent, resize.
 
-    MRI intensity has no absolute meaning -- it varies by scanner, sequence, and
-    institution, and this data comes from ~20 sites. Per-slice percentile
-    normalisation is what makes them comparable; a fixed window would not.
+    MRI intensity has no absolute meaning -- it varies by scanner, sequence and
+    site, and this data comes from ~20 institutions -- so normalisation is per
+    slice by percentile rather than a fixed window.
     """
     import cv2
 
     lo, hi = np.percentile(arr, [1, 99])
     if hi <= lo:
         hi = lo + 1.0
-    arr = np.clip((arr - lo) / (hi - lo), 0, 1)
-    return (cv2.resize(arr, (size, size), interpolation=cv2.INTER_AREA) * 255).astype(np.uint8)
+    img = np.clip((arr.astype(np.float32) - lo) / (hi - lo), 0, 1)
+
+    if spacing > 0:
+        want = int(round(crop_mm / spacing))
+        h, w = img.shape
+        # Only crop when the frame is genuinely larger; a silent no-op otherwise.
+        if want < min(h, w):
+            cy, cx = h // 2, w // 2
+            half = want // 2
+            img = img[max(0, cy - half):cy + half, max(0, cx - half):cx + half]
+
+    return (cv2.resize(img, (size, size), interpolation=cv2.INTER_AREA) * 255).astype(np.uint8)
+
+
+def load_slot(series_dir: Path, size: int, crop_mm: float) -> np.ndarray:
+    """N_ANCHORS anchors across the joint, GROUP adjacent slices at each."""
+    import pydicom
+
+    n_out = N_ANCHORS * GROUP
+    out = np.zeros((n_out, size, size), dtype=np.uint8)
+
+    files = list(series_dir.glob("*.dcm"))
+    if not files:
+        return out
+    files = sort_by_position(files, pydicom)
+
+    # Anchors spread across the central 70%: the outer slices of a knee series are
+    # mostly soft tissue and air, but the menisci sit peripherally, so the window
+    # stays wide rather than hugging the middle.
+    lo, hi = int(len(files) * 0.15), int(np.ceil(len(files) * 0.85))
+    core = files[lo:hi] or files
+    anchors = np.linspace(GROUP // 2, len(core) - 1 - GROUP // 2, N_ANCHORS)
+    anchors = np.clip(anchors.round().astype(int), 0, max(0, len(core) - 1))
+
+    k = 0
+    for a in anchors:
+        for d in range(-(GROUP // 2), GROUP // 2 + 1):
+            i = int(np.clip(a + d, 0, len(core) - 1))
+            try:
+                ds = pydicom.dcmread(str(core[i]))
+                out[k] = crop_resize(ds.pixel_array, pixel_spacing(ds), size, crop_mm)
+            except Exception:
+                pass
+            k += 1
+    return out
 
 
 def process_study(args: tuple) -> tuple[str, bool, str]:
-    study_id, series_ids, root, split, out_dir, n_slices, size = args
+    study_id, series_ids, root, split, out_dir, size, crop_mm, n_slots = args
     dest = Path(out_dir) / f"{study_id}.npy"
     if dest.exists():
         return study_id, True, "cached"
     try:
-        vols = [
-            load_slices(Path(root) / f"{split}_series" / study_id / sid, n_slices, size)
-            for sid in series_ids
-        ]
-        np.save(dest, np.stack(vols))          # (n_series, n_slices, size, size) uint8
+        n_out = N_ANCHORS * GROUP
+        vol = np.zeros((n_slots, n_out, size, size), dtype=np.uint8)
+        for i, sid in enumerate(series_ids[:n_slots]):
+            vol[i] = load_slot(Path(root) / f"{split}_series" / study_id / sid,
+                               size, crop_mm)
+        np.save(dest, vol)
         return study_id, True, ""
     except Exception:
         return study_id, False, traceback.format_exc(limit=2)
@@ -134,11 +184,11 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", type=Path, required=True)
     ap.add_argument("--split", default="train", choices=["train", "test"])
-    ap.add_argument("--n-series", type=int, default=3)
-    ap.add_argument("--n-slices", type=int, default=12)
-    ap.add_argument("--size", type=int, default=224)
+    ap.add_argument("--slots", type=int, default=4)
+    ap.add_argument("--size", type=int, default=256)
+    ap.add_argument("--crop-mm", type=float, default=CROP_MM)
     ap.add_argument("--workers", type=int, default=4)
-    ap.add_argument("--limit", type=int, help="process only N studies (for a smoke test)")
+    ap.add_argument("--limit", type=int, help="process only N studies (smoke test)")
     args = ap.parse_args()
 
     root = data_root()
@@ -148,15 +198,14 @@ def main() -> None:
     groups = series.groupby(ID_COL)
     studies = list(groups.groups)[: args.limit]
 
-    per_study_mb = args.n_series * args.n_slices * args.size ** 2 / 1e6
+    n_out = N_ANCHORS * GROUP
+    mb = args.slots * n_out * args.size ** 2 / 1e6
     print(f"{len(studies)} studies -> {args.out}")
-    print(f"{per_study_mb:.1f} MB each, ~{per_study_mb * len(studies) / 1024:.1f} GB total")
+    print(f"{args.slots} slots x {n_out} slices x {args.size}px, {args.crop_mm:.0f}mm crop")
+    print(f"{mb:.1f} MB each, ~{mb * len(studies) / 1024:.1f} GB total")
 
-    jobs = [
-        (s, pick_series(groups.get_group(s), args.n_series), str(root),
-         args.split, str(args.out), args.n_slices, args.size)
-        for s in studies
-    ]
+    jobs = [(s, pick_series(groups.get_group(s), args.slots), str(root), args.split,
+             str(args.out), args.size, args.crop_mm, args.slots) for s in studies]
 
     done = failed = 0
     with ProcessPoolExecutor(args.workers) as pool:
@@ -172,9 +221,6 @@ def main() -> None:
                 print(f"  {done}/{len(jobs)}  ({failed} failed)", flush=True)
 
     print(f"\ndone: {done - failed} written, {failed} failed")
-    if failed:
-        print("Failures become zero-filled volumes at train time rather than crashing;")
-        print("check the count is small before trusting the run.")
 
 
 if __name__ == "__main__":

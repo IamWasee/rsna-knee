@@ -1,8 +1,14 @@
 """PyTorch dataset over the preprocessed cache.
 
-Reads the .npy volumes written by preprocess.py, not DICOM -- decoding DICOM in the
-training loop would leave the GPU idle. One item is a whole study, shaped
-(n_series * n_slices, 3, H, W), because labels are per study, not per slice.
+Reads the .npy volumes written by preprocess.py, never DICOM -- decoding in the
+training loop leaves the GPU idle. One item is a whole study, because labels are
+per study, not per slice.
+
+Each group of three physically adjacent slices becomes the R/G/B channels of one
+encoder input. That is deliberate: the backbone is pretrained on three-channel
+images, and stacking many slices as channels (then averaging the first
+convolution's weights) destroys the input interface it learned. Three adjacent
+slices give a genuine ~10 mm depth neighbourhood through an untouched backbone.
 """
 
 from __future__ import annotations
@@ -18,19 +24,18 @@ from torch.utils.data import Dataset
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from config import ID_COL, LABELS  # noqa: E402
 
-# ImageNet statistics: the backbone is pretrained, so its input distribution is
-# fixed even though these are greyscale MRI replicated to 3 channels.
 MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
 STD = np.array([0.229, 0.224, 0.225], dtype=np.float32)
+GROUP = 3
 
 
 class KneeStudies(Dataset):
     def __init__(self, df: pd.DataFrame, cache: Path, train: bool = True,
-                 n_series: int = 3, n_slices: int = 12, size: int = 224):
+                 slots: int = 4, n_slices: int = 9, size: int = 256):
         self.df = df.reset_index(drop=True)
         self.cache = Path(cache)
         self.train = train
-        self.shape = (n_series, n_slices, size, size)
+        self.shape = (slots, n_slices, size, size)
         self.has_labels = all(c in df.columns for c in LABELS)
 
     def __len__(self) -> int:
@@ -52,15 +57,14 @@ class KneeStudies(Dataset):
     def _augment(self, vol: np.ndarray) -> np.ndarray:
         """Light augmentation only.
 
-        No horizontal flip: left and right knees are both present, but medial and
-        lateral are separate labels, and a flip swaps them. That would corrupt four
-        of the twelve targets.
+        No horizontal flip: medial and lateral are separate labels and a flip
+        swaps them, corrupting four of the twelve targets.
         """
-        if np.random.rand() < 0.5:                      # brightness / contrast
+        if np.random.rand() < 0.5:
             vol = np.clip(vol.astype(np.float32) * np.random.uniform(0.85, 1.15)
                           + np.random.uniform(-15, 15), 0, 255).astype(np.uint8)
-        if np.random.rand() < 0.3:                      # small translation
-            dx, dy = np.random.randint(-12, 13, 2)
+        if np.random.rand() < 0.3:
+            dx, dy = np.random.randint(-10, 11, 2)
             vol = np.roll(vol, (dy, dx), axis=(-2, -1))
         return vol
 
@@ -70,13 +74,12 @@ class KneeStudies(Dataset):
         if self.train:
             vol = self._augment(vol)
 
-        n_series, n_slices, h, w = vol.shape
-        x = vol.reshape(n_series * n_slices, h, w).astype(np.float32) / 255.0
-        x = np.repeat(x[:, None], 3, axis=1)            # (N, 3, H, W)
+        slots, n_slices, h, w = vol.shape
+        # (slots, 9, H, W) -> (slots*3, 3, H, W): each triplet is one RGB input.
+        x = vol.reshape(slots * (n_slices // GROUP), GROUP, h, w).astype(np.float32) / 255.0
         x = (x - MEAN[None, :, None, None]) / STD[None, :, None, None]
         x = torch.from_numpy(x)
 
         if not self.has_labels:
             return x, row[ID_COL]
-        y = torch.tensor(row[LABELS].values.astype(np.float32))
-        return x, y
+        return x, torch.tensor(row[LABELS].values.astype(np.float32))
