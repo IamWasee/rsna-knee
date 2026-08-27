@@ -31,13 +31,27 @@ if missing:
 print("all required packages preinstalled")
 
 # Find the code and the weights among the attached inputs.
-found = glob.glob("/kaggle/input/**/src/infer.py", recursive=True)
+#
+# NOT a recursive glob over /kaggle/input: that walks the whole competition
+# dataset -- hundreds of thousands of DICOM files -- and measured 421 seconds to
+# locate two paths. Search the notebook-output trees only, bounded in depth.
+def find(pattern: str, max_depth: int = 4) -> list[str]:
+    roots = glob.glob("/kaggle/input/notebooks/*/*") + glob.glob("/kaggle/input/*")
+    hits = []
+    for r in roots:
+        if "rsna-knee-abnormality-detection" in r:      # skip the DICOM archive
+            continue
+        for d in range(1, max_depth + 1):
+            hits += glob.glob(os.path.join(r, *(["*"] * (d - 1)), pattern))
+    return sorted(set(hits))
+
+found = find("infer.py") + find("src/infer.py")
 if not found:
     raise SystemExit("src/ not found -- attach the training notebook's output.")
 CODE = str(Path(found[0]).parents[1])
 sys.path.insert(0, f"{CODE}/src")
 
-WEIGHTS = sorted(glob.glob("/kaggle/input/**/*.pt", recursive=True))
+WEIGHTS = find("*.pt")
 if not WEIGHTS:
     raise SystemExit("no .pt checkpoints found -- attach the training notebook's output.")
 WDIR = str(Path(WEIGHTS[0]).parent)
