@@ -1,41 +1,57 @@
 # ============================================================
-# RSNA Knee — Step 9: the SUBMISSION notebook
+# RSNA Knee — THE SUBMISSION NOTEBOOK
 #
-# This is the one that gets submitted. Rules for it:
-#   - Internet MUST be OFF
-#   - everything it needs comes from attached datasets
-#   - 9 hours total, INCLUDING preprocessing the hidden test set from raw DICOM
+# This is the one you submit. Rules it must respect:
+#   - Internet OFF (Settings -> Internet)
+#   - GPU on
+#   - everything comes from attached inputs; nothing is downloaded
 #
-# Attach: the competition, plus your weights dataset (from step 7).
-# Do NOT attach the train cache -- the test studies are different studies.
+# Attach exactly TWO inputs:
+#   1. the competition
+#   2. Notebook Output -> your TRAINING notebook
+#      (that one output carries both the .pt checkpoints AND src/, because the
+#       training cell clones the repo into /kaggle/working, which Kaggle saves)
+#
+# Delete Kaggle's default os.walk starter cell.
 # ============================================================
 import sys, glob, os, time
 from pathlib import Path
 t0 = time.time()
 
-# No pip install: there is no internet. Kaggle preinstalls torch, timm, pydicom, cv2.
-CODE = "/kaggle/working/rsna-knee"
-# The repo is not reachable offline either -- attach it as a dataset, or paste
-# src/ into the notebook. This path assumes a dataset named rsna-knee-code.
-CODE_DS = glob.glob("/kaggle/input/**/src/infer.py", recursive=True)
-if CODE_DS:
-    CODE = str(Path(CODE_DS[0]).parents[1])
-sys.path.insert(0, f"{CODE}/src")
-print("code:", CODE)
+# No pip install -- there is no internet. Verify what we need is already here.
+missing = []
+for mod in ("torch", "timm", "pydicom", "cv2", "pandas", "numpy", "sklearn"):
+    try:
+        __import__(mod)
+    except ImportError:
+        missing.append(mod)
+if missing:
+    raise SystemExit(f"NOT PREINSTALLED: {missing} -- cannot pip install offline.\n"
+                     "Package these as a Kaggle Dataset and install from it.")
+print("all required packages preinstalled")
 
-WEIGHTS = glob.glob("/kaggle/input/**/*.pt", recursive=True)
-print(f"{len(WEIGHTS)} checkpoints found")
+# Find the code and the weights among the attached inputs.
+found = glob.glob("/kaggle/input/**/src/infer.py", recursive=True)
+if not found:
+    raise SystemExit("src/ not found -- attach the training notebook's output.")
+CODE = str(Path(found[0]).parents[1])
+sys.path.insert(0, f"{CODE}/src")
+
+WEIGHTS = sorted(glob.glob("/kaggle/input/**/*.pt", recursive=True))
+if not WEIGHTS:
+    raise SystemExit("no .pt checkpoints found -- attach the training notebook's output.")
 WDIR = str(Path(WEIGHTS[0]).parent)
+print(f"code:    {CODE}")
+print(f"weights: {WDIR}  ({len(WEIGHTS)} folds)")
 
 CACHE = "/kaggle/working/test_cache"
 
-# 1. Preprocess the hidden test set. This is inside the 9 hours, so it is the
-#    part most likely to blow the budget -- the public test set is 3 studies but
-#    the real one is not.
+# 1. Preprocess the hidden test set. Measured at 2.73 studies/sec with 4 workers,
+#    so even 20,000 studies is ~2h of the 9h budget.
 !python $CODE/src/preprocess.py --out $CACHE --split test --workers 4
 print(f"preprocess: {(time.time()-t0)/60:.1f} min")
 
-# 2. Predict and write submission.csv.
+# 2. Predict and write submission.csv at the path Kaggle expects.
 !python $CODE/src/infer.py --cache $CACHE --weights $WDIR --out /kaggle/working/submission.csv
 
 import pandas as pd
