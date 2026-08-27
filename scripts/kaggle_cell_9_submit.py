@@ -32,28 +32,42 @@ print("all required packages preinstalled")
 
 # Find the code and the weights among the attached inputs.
 #
-# NOT a recursive glob over /kaggle/input: that walks the whole competition
-# dataset -- hundreds of thousands of DICOM files -- and measured 421 seconds to
-# locate two paths. Search the notebook-output trees only, bounded in depth.
-def find(pattern: str, max_depth: int = 4) -> list[str]:
-    roots = glob.glob("/kaggle/input/notebooks/*/*") + glob.glob("/kaggle/input/*")
+# os.walk with pruning, not glob(recursive=True): the latter descends the whole
+# competition dataset -- hundreds of thousands of DICOM files -- and measured 421
+# seconds. Pruning that one directory keeps it complete and fast.
+def find(filename: str, suffix: str = "") -> list[str]:
     hits = []
-    for r in roots:
-        if "rsna-knee-abnormality-detection" in r:      # skip the DICOM archive
-            continue
-        for d in range(1, max_depth + 1):
-            hits += glob.glob(os.path.join(r, *(["*"] * (d - 1)), pattern))
-    return sorted(set(hits))
+    for root, dirs, files in os.walk("/kaggle/input"):
+        dirs[:] = [d for d in dirs
+                   if "rsna-knee-abnormality-detection" not in os.path.join(root, d)]
+        for f in files:
+            if (f == filename) or (suffix and f.endswith(suffix)):
+                hits.append(os.path.join(root, f))
+    return sorted(hits)
 
-found = find("infer.py") + find("src/infer.py")
-if not found:
-    raise SystemExit("src/ not found -- attach the training notebook's output.")
+
+found = find("infer.py")
+WEIGHTS = find("", ".pt")
+
+if not found or not WEIGHTS:
+    print("WHAT IS ACTUALLY ATTACHED:")
+    for root, dirs, files in os.walk("/kaggle/input"):
+        depth = root.count(os.sep) - 2
+        if depth > 3 or "rsna-knee-abnormality-detection" in root:
+            dirs[:] = []
+            continue
+        print("  " * depth + os.path.basename(root) + "/")
+        for f in files[:5]:
+            print("  " * (depth + 1) + f)
+    raise SystemExit(
+        f"missing: {'src/infer.py ' if not found else ''}"
+        f"{'checkpoints' if not WEIGHTS else ''}\n"
+        "Attach: Notebook Output -> your 5-fold TRAINING notebook. Its output holds\n"
+        "both weights/*.pt and the cloned rsna-knee/src/."
+    )
+
 CODE = str(Path(found[0]).parents[1])
 sys.path.insert(0, f"{CODE}/src")
-
-WEIGHTS = find("*.pt")
-if not WEIGHTS:
-    raise SystemExit("no .pt checkpoints found -- attach the training notebook's output.")
 WDIR = str(Path(WEIGHTS[0]).parent)
 print(f"code:    {CODE}")
 print(f"weights: {WDIR}  ({len(WEIGHTS)} folds)")
