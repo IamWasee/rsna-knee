@@ -14,9 +14,14 @@ sys.path.insert(0, f"{CODE}/src")
 
 import pandas as pd
 TRAIN = next(iter(glob.glob("/kaggle/input/**/train.csv", recursive=True)))
-PREDS = max(glob.glob("/kaggle/input/**/model_preds_all.csv", recursive=True),
-            key=lambda f: len(pd.read_csv(f)))
-print("model preds:", PREDS, f"({len(pd.read_csv(PREDS))} studies)")
+# The sweep needs predictions ON THE GOLD STUDIES. model_preds_all.csv holds only
+# the 4,349 unlabelled ones, so scoring it has nothing to score against.
+gold_preds = glob.glob("/kaggle/input/**/model_preds_gold.csv", recursive=True)
+if not gold_preds:
+    raise SystemExit("attach the notebook containing model_preds_gold.csv "
+                     "(the --validate run), not just model_preds_all.csv")
+PREDS = gold_preds[0]
+print("gold preds:", PREDS, f"({len(pd.read_csv(PREDS))} studies)")
 
 # Prints the usual comparison plus the Synovitis borrowing sweep at the end.
 !python $CODE/src/ensemble.py --data "$TRAIN" --model-preds "$PREDS"
