@@ -34,17 +34,24 @@ print("cache: ", CACHE, f"({len(cands)} volumes)" if cands else "")
 if not LABELS or not CACHE:
     raise SystemExit("Attach both notebook outputs -- see the header above.")
 
-# One fold, 2 epochs. This is a smoke test: does the loop run end to end, and is
-# the first GOLD number sane? Do not read much into the value yet.
+# Measured: 305s/epoch, fold0 2 epochs -> GOLD 0.653. The loop works.
+#
+# One fold, 8 epochs, WITH label sharpening (~45 min). The question this answers
+# is narrow: does sharpening beat the 0.653 baseline? Labels were compressed
+# toward 0.5, which caps the gradient BCE can provide.
 !python $CODE/src/train.py --cache "$CACHE" --labels "$LABELS" \
-    --only-fold 0 --epochs 2 --batch 4 --backbone resnet34 \
+    --only-fold 0 --epochs 8 --batch 4 --backbone resnet34 \
     --out /kaggle/working/weights
 
-# Full run, once the above is sane. Kaggle caps a session at 9h, so train folds
-# in separate sessions with --only-fold rather than all five at once.
+# Control, if you want the comparison rather than my reasoning (~45 min):
 # !python $CODE/src/train.py --cache "$CACHE" --labels "$LABELS" \
-#     --only-fold 0 --epochs 8 --batch 4 --backbone resnet34 \
-#     --out /kaggle/working/weights
+#     --only-fold 0 --epochs 8 --batch 4 --backbone resnet34 --no-sharpen \
+#     --out /kaggle/working/weights_nosharp
+
+# Full 5-fold run once a configuration is chosen. At 305s/epoch that is ~3.5h
+# for 8 epochs x 5 folds -- it fits in one 9h session.
+# !python $CODE/src/train.py --cache "$CACHE" --labels "$LABELS" \
+#     --epochs 8 --batch 4 --backbone resnet34 --out /kaggle/working/weights
 
 # Then save /kaggle/working/weights as a Kaggle Dataset -- the submission
 # notebook is offline and can only get weights from an attached dataset.
