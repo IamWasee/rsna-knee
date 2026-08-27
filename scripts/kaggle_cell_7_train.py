@@ -16,11 +16,20 @@ CODE = "/kaggle/working/rsna-knee"
 sys.path.insert(0, f"{CODE}/src")
 
 # Locate the attached inputs rather than hardcoding dataset names.
-LABELS = next(iter(glob.glob("/kaggle/input/**/report_labels.csv", recursive=True)), None)
+#
+# Several notebooks may expose a report_labels.csv -- an earlier run stopped at
+# 3,520 studies before the full one reached 4,349. Take the one with the most
+# rows; silently training on the stale file would drop 800 studies and look fine.
+import pandas as pd
+found = glob.glob("/kaggle/input/**/report_labels.csv", recursive=True)
+for f in found:
+    print(f"  candidate: {f}  ({len(pd.read_csv(f))} studies)")
+LABELS = max(found, key=lambda f: len(pd.read_csv(f))) if found else None
+
 cands  = glob.glob("/kaggle/input/**/*.npy", recursive=True)
 CACHE  = os.path.dirname(cands[0]) if cands else None
 
-print("labels:", LABELS)
+print("\nusing labels:", LABELS)
 print("cache: ", CACHE, f"({len(cands)} volumes)" if cands else "")
 if not LABELS or not CACHE:
     raise SystemExit("Attach both notebook outputs -- see the header above.")
