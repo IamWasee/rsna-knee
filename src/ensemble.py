@@ -46,6 +46,31 @@ def combine(kw: pd.DataFrame, ml: pd.DataFrame, how: str, w: float = 0.5) -> pd.
     raise ValueError(how)
 
 
+# Labels the reports barely discuss, and a better-reported label to borrow from.
+#
+# Only ~16% of reports mention synovitis in any of the nine languages, yet 47% of
+# the annotated studies are positive: the radiologists marked what they saw in the
+# images, not what the report said. So for this label the extractor is guessing on
+# most studies. Effusion is well reported and correlates ~0.5 with synovitis in the
+# annotated set, which is signal worth borrowing.
+DONORS = {"Synovitis": "Effusion"}
+
+
+def borrow(preds: pd.DataFrame, weight: float) -> pd.DataFrame:
+    """Blend a donor label's ranking into a poorly-reported one.
+
+    Rank space, because AUC reads order and the two labels are on different scales.
+    weight=0 leaves the label untouched.
+    """
+    out = preds.copy()
+    for target, donor in DONORS.items():
+        if target in out.columns and donor in out.columns:
+            r_t = out[target].rank(pct=True)
+            r_d = out[donor].rank(pct=True)
+            out[target] = (1 - weight) * r_t + weight * r_d
+    return out
+
+
 def score(name: str, truth: pd.DataFrame, preds: pd.DataFrame, per_label: bool = False) -> float:
     s, by_label = macro_auc(truth, preds.reindex(columns=LABELS).fillna(0.5))
     print(f"{name:<28} {s:.3f}")
@@ -134,6 +159,16 @@ def main() -> None:
                 best, best_name, best_preds = s, label, preds
 
     print(f"\nbest: {best_name} at {best:.3f}")
+
+    # Does borrowing Effusion's ranking help Synovitis? Sweep, do not assume.
+    print("\n--- Synovitis borrowing Effusion's ranking ---")
+    base = combine(k, m, "rank_mean", 0.5).set_index(truth.index)
+    for w in (0.0, 0.1, 0.2, 0.3, 0.4, 0.5):
+        b = borrow(base, w)
+        macro, per = macro_auc(truth, b)
+        print(f"  w={w:.1f}  Synovitis {per['Synovitis']:.3f}   macro {macro:.3f}")
+    print("  A sweep over 58 studies with 27 positives overfits easily. Adopt only")
+    print("  if the trend is smooth and the gain is well outside +/-0.05.")
     print("\nCAUTION: picking the best of 7 combinations on 58 studies overfits. The")
     print("honest read is whether ensembling beats BOTH sources across most settings,")
     print("not which weight happened to win. Prefer rank_mean w=0.5 unless one source")
