@@ -38,3 +38,17 @@ REPORT_LANGUAGES = ["en", "es", "tr", "hr", "el", "de", "bg", "nl", "fr"]
 # De-identification placeholders present in report text.
 DEID_PLACEHOLDERS = ["[DATE]", "[TIME]", "[ID]", "[REDACTED]",
                      "[NAME]", "[YEAR]", "[IDENTIFIER]", "[PROFESSION]"]
+
+# Share of gold-positive studies whose report mentions the finding at all, measured
+# on the 58 annotated studies. This is a CEILING on text-derived supervision: no
+# extractor recovers what was never written. It ranks almost perfectly with measured
+# extraction AUC (ACL 0.855, Effusion 0.726, Fracture 0.725, Synovitis 0.640,
+# PF OA 0.580), which is the evidence that lexicon quality is not the binding
+# constraint for the low-coverage labels -- report coverage is.
+REPORT_COVERAGE = {
+    "ACL": 0.833,        # 55.5% of reports mention it
+    "Effusion": 0.771,   # 64.4%
+    "Fracture": 0.556,   # 19.7%
+    "Synovitis": 0.444,  # 14.1%
+    "PF OA": 0.333,      # 43.7% -- mentioned often, but not in the positive studies
+}
