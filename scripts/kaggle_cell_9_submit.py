@@ -60,6 +60,29 @@ def find(filename: str = "", suffix: str = "") -> list[str]:
 found = find(filename="infer.py")
 WEIGHTS = find(suffix=".pt")
 
+# Kaggle's dataset uploader auto-extracts archives, and a .pt file IS a zip -- so
+# uploading checkpoints to a dataset explodes each one into a directory tree
+# (data.pkl, version, byteorder, data/...). Nothing is lost; rebuild the zips.
+if not WEIGHTS:
+    import zipfile
+    marks = [os.path.dirname(p) for p in find(filename="data.pkl")]
+    if marks:
+        print(f"found {len(marks)} exploded checkpoints; rebuilding")
+        os.makedirs("/kaggle/working/rebuilt", exist_ok=True)
+        for inner in sorted(marks):
+            outer = os.path.dirname(inner)                  # .../weights/fold0
+            name = os.path.basename(outer)                  # fold0
+            out = f"/kaggle/working/rebuilt/{name}.pt"
+            # torch.save writes an uncompressed zip whose entries are prefixed by
+            # an inner directory. Preserve that prefix exactly.
+            with zipfile.ZipFile(out, "w", zipfile.ZIP_STORED) as z:
+                for root, _, files in os.walk(outer):
+                    for f in files:
+                        full = os.path.join(root, f)
+                        z.write(full, os.path.relpath(full, outer))
+            print(f"  {name}.pt  ({os.path.getsize(out)/1e6:.1f} MB)")
+        WEIGHTS = sorted(glob.glob("/kaggle/working/rebuilt/*.pt"))
+
 if not found or not WEIGHTS:
     print("WHAT IS ACTUALLY ATTACHED:")
     for root, dirs, files in os.walk("/kaggle/input", followlinks=True):
