@@ -1,26 +1,41 @@
 # ============================================================
 # RSNA Knee — Step 7: train the image model
-# GPU required. Attach the cache dataset from step 6.
+#
+# Attach THREE inputs:
+#   1. the competition (rsna-knee-abnormality-detection)
+#   2. Notebook Output -> the preprocessing notebook ("notebooka") -> cache/
+#   3. Notebook Output -> the labelling notebook -> report_labels.csv
+#
+# GPU on. Delete Kaggle's default os.walk starter cell.
 # ============================================================
 !pip install -q timm
 
-import sys, glob
+import sys, glob, os
 CODE = "/kaggle/working/rsna-knee"
 !rm -rf $CODE && git clone -q https://github.com/IamWasee/rsna-knee.git $CODE
 sys.path.insert(0, f"{CODE}/src")
 
-CACHE  = "/kaggle/input/rsna-knee-cache"        # the dataset saved in step 6
-LABELS = "/kaggle/input/rsna-knee-labels/report_labels.csv"   # from step 4/5
+# Locate the attached inputs rather than hardcoding dataset names.
+LABELS = next(iter(glob.glob("/kaggle/input/**/report_labels.csv", recursive=True)), None)
+cands  = glob.glob("/kaggle/input/**/*.npy", recursive=True)
+CACHE  = os.path.dirname(cands[0]) if cands else None
 
-# 1. One fold, few epochs -- proves the loop runs end to end and gives a first
-#    honest number on the 58 gold studies.
-!python $CODE/src/train.py --cache $CACHE --labels $LABELS \
-    --only-fold 0 --epochs 2 --batch 4 --backbone resnet34 --out /kaggle/working/weights
+print("labels:", LABELS)
+print("cache: ", CACHE, f"({len(cands)} volumes)" if cands else "")
+if not LABELS or not CACHE:
+    raise SystemExit("Attach both notebook outputs -- see the header above.")
 
-# 2. Full run once the above is sane. Kaggle caps a session at 9h, so train folds
-#    across separate sessions with --only-fold rather than all five at once.
-# !python $CODE/src/train.py --cache $CACHE --labels $LABELS \
-#     --only-fold 1 --epochs 6 --batch 4 --backbone resnet34 --out /kaggle/working/weights
+# One fold, 2 epochs. This is a smoke test: does the loop run end to end, and is
+# the first GOLD number sane? Do not read much into the value yet.
+!python $CODE/src/train.py --cache "$CACHE" --labels "$LABELS" \
+    --only-fold 0 --epochs 2 --batch 4 --backbone resnet34 \
+    --out /kaggle/working/weights
 
-# 3. Save /kaggle/working/weights as a Kaggle Dataset -- the submission notebook
-#    is offline and can only get weights from an attached dataset.
+# Full run, once the above is sane. Kaggle caps a session at 9h, so train folds
+# in separate sessions with --only-fold rather than all five at once.
+# !python $CODE/src/train.py --cache "$CACHE" --labels "$LABELS" \
+#     --only-fold 0 --epochs 8 --batch 4 --backbone resnet34 \
+#     --out /kaggle/working/weights
+
+# Then save /kaggle/working/weights as a Kaggle Dataset -- the submission
+# notebook is offline and can only get weights from an attached dataset.
