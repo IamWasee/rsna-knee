@@ -82,9 +82,21 @@ if not found or not WEIGHTS:
 
 CODE = str(Path(found[0]).parents[1])
 sys.path.insert(0, f"{CODE}/src")
-WDIR = str(Path(WEIGHTS[0]).parent)
+
+# Collect every checkpoint into one flat directory. A dataset upload can nest each
+# file in its own folder, and taking the parent of the first .pt would then point
+# at a directory holding exactly one fold -- a 1-model ensemble submitted silently
+# as if it were 5.
+import shutil
+WDIR = "/kaggle/working/weights_flat"
+os.makedirs(WDIR, exist_ok=True)
+for w in WEIGHTS:
+    shutil.copy(w, os.path.join(WDIR, os.path.basename(w)))
+
 print(f"code:    {CODE}")
 print(f"weights: {WDIR}  ({len(WEIGHTS)} folds)")
+for w in WEIGHTS:
+    print(f"   {w}")
 
 CACHE = "/kaggle/working/test_cache"
 
