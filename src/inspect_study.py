@@ -54,7 +54,8 @@ def main() -> None:
     ap.add_argument("--n", type=int, default=3, help="how many studies to show")
     ap.add_argument("--worst", action="store_true",
                     help="show the studies the model got most wrong")
-    ap.add_argument("--show-images", action="store_true", default=True)
+    ap.add_argument("--figdir", default="/kaggle/working/figs",
+                    help="where to save the attention images; empty string disables")
     args = ap.parse_args()
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -122,16 +123,27 @@ def main() -> None:
         print(str(row["Report"])[:900])
         print()
 
-        if args.show_images:
-            _plot(args.cache, row[ID_COL], a, n_sl)
+        if args.figdir:
+            out = _plot(args.cache, row[ID_COL], a, n_sl, Path(args.figdir), int(idx))
+            if out:
+                print(f"[image saved: {out}]\n")
 
 
-def _plot(cache: Path, study_id: str, attn: np.ndarray, n_slices: int) -> None:
+def _plot(cache: Path, study_id: str, attn: np.ndarray, n_slices: int,
+          figdir: Path, tag: int) -> Path | None:
+    """Save to PNG rather than show().
+
+    This script runs as a subprocess under `!python`, and plt.show() in a
+    subprocess renders to nothing -- Jupyter only displays figures created in its
+    own kernel. Writing files lets the calling cell display them.
+    """
+    import matplotlib
+    matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
     path = Path(cache) / f"{study_id}.npy"
     if not path.exists():
-        return
+        return None
     vol = np.load(path)
     top = np.argsort(-attn)[:6]
     fig, ax = plt.subplots(1, len(top), figsize=(3 * len(top), 3.4))
@@ -140,9 +152,14 @@ def _plot(cache: Path, study_id: str, attn: np.ndarray, n_slices: int) -> None:
         ax[i].imshow(vol[s, sl], cmap="gray")
         ax[i].set_title(f"series {s} slice {sl}\nweight {attn[k]:.3f}", fontsize=9)
         ax[i].axis("off")
-    fig.suptitle("the six slices the model looked at hardest", fontsize=11)
+    fig.suptitle(f"study {study_id[-16:]} -- the six slices the model weighted most",
+                 fontsize=11)
     plt.tight_layout()
-    plt.show()
+    figdir.mkdir(parents=True, exist_ok=True)
+    out = figdir / f"study_{tag:03d}.png"
+    fig.savefig(out, dpi=110, bbox_inches="tight")
+    plt.close(fig)
+    return out
 
 
 if __name__ == "__main__":
