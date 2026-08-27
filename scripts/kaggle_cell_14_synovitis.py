@@ -1,38 +1,40 @@
 # ============================================================
-# RSNA Knee — Can Synovitis borrow from Effusion?
+# RSNA Knee — Synovitis: how much is reachable from the reports?
 #
-# Only ~16% of reports mention synovitis; 47% of annotated studies are positive.
-# The extractor is guessing on most studies. Effusion is well reported and
-# correlates ~0.5 with synovitis in the annotated set.
-#
-# Attach: competition + a notebook output with model_preds_all.csv. CPU, ~1 min.
+# Attach ONLY the competition. CPU. ~30 seconds. No model, no GPU, no other
+# notebooks needed -- the keyword extractor runs instantly and isolates the
+# question: does Effusion's ranking improve Synovitis?
 # ============================================================
 import sys, glob
 CODE = "/kaggle/working/rsna-knee"
 !rm -rf $CODE && git clone -q https://github.com/IamWasee/rsna-knee.git $CODE
 sys.path.insert(0, f"{CODE}/src")
 
-import pandas as pd
 TRAIN = next(iter(glob.glob("/kaggle/input/**/train.csv", recursive=True)))
-# The sweep needs predictions ON THE GOLD STUDIES. model_preds_all.csv holds only
-# the 4,349 unlabelled ones, so scoring it has nothing to score against.
-gold_preds = glob.glob("/kaggle/input/**/model_preds_gold.csv", recursive=True)
-if not gold_preds:
-    raise SystemExit("attach the notebook containing model_preds_gold.csv "
-                     "(the --validate run), not just model_preds_all.csv")
-PREDS = gold_preds[0]
-print("gold preds:", PREDS, f"({len(pd.read_csv(PREDS))} studies)")
+print("train.csv:", TRAIN)
 
-# Prints the usual comparison plus the Synovitis borrowing sweep at the end.
-!python $CODE/src/ensemble.py --data "$TRAIN" --model-preds "$PREDS"
+# Full per-label AUC (now with severity grading) plus the borrowing sweep.
+!python $CODE/src/report_labels.py --data "$TRAIN" --borrow Synovitis Effusion
 
-# How often is synovitis even mentioned? The 16% claim, checked on our own corpus.
-import re
+# How much of each weak label is even mentioned in the reports? If a finding is
+# rarely written down, no extractor can recover it and the ceiling is not ours.
+import re, pandas as pd
 train = pd.read_csv(TRAIN)
-pat = re.compile(r"synovit|sinovit|υμεν|синови|sinovyal|synovial", re.I)
-hit = train["Report"].astype(str).str.contains(pat)
-print(f"\nreports mentioning a synovitis term: {hit.mean():.1%} ({hit.sum()}/{len(train)})")
 gold = train[train["Synovitis"].notna()]
-print(f"gold Synovitis positive rate: {gold['Synovitis'].mean():.1%}")
-print(f"of gold positives, how many reports mention it: "
-      f"{hit[gold.index][gold['Synovitis'] == 1].mean():.1%}")
+TERMS = {
+    "Synovitis": r"synovit|sinovit|υμεν|синови|sinovyal|synovial",
+    "Fracture":  r"fract|fraktur|kırık|фрактур|счупван|κάταγμα|prijelom|breuk",
+    "PF OA":     r"patellofemoral|patelofemoral|femoropatel|chondromalac|condromalac|retropatell",
+    "Effusion":  r"effusion|derrame|erguss|efüzyon|épanchement|излив|συλλογή|izliv|hydrops",
+    "ACL":       r"anterior cruciate|\bACL\b|cruzado anterior|\bLCA\b|kruisband|kreuzband|çapraz|κρυπτ|VKB",
+}
+print(f"\n{'label':<12} {'mentioned':>10} {'gold rate':>10} {'pos mentioned':>14}")
+print("-" * 50)
+for lab, pat in TERMS.items():
+    hit = train["Report"].astype(str).str.contains(pat, case=False, regex=True)
+    pos = gold[lab] == 1
+    print(f"{lab:<12} {hit.mean():>10.1%} {gold[lab].mean():>10.1%} "
+          f"{hit[gold.index][pos].mean():>14.1%}")
+print("-" * 50)
+print("'pos mentioned' is the ceiling: the share of true positives the text even")
+print("refers to. Low means the label is unreachable from reports at any quality.")

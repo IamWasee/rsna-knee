@@ -252,16 +252,51 @@ def keyword_extract(report: str) -> dict[str, float]:
     return out
 
 
+def borrow_sweep(train: pd.DataFrame, target: str, donor: str) -> None:
+    """Does a well-reported label's ranking improve a poorly-reported one?
+
+    Synovitis is mentioned in 14.1% of reports but positive in 46.6% of annotated
+    studies, and only 44.4% of its positives are mentioned at all -- so more than
+    half are unreachable from text at any extraction quality. Effusion is well
+    reported and correlates with it. Blending is done in rank space because AUC
+    reads order and the two labels sit on different scales.
+    """
+    labeled, _ = gold_split(train)
+    preds = pd.DataFrame([keyword_extract(t) for t in labeled["Report"]],
+                         index=labeled.index).reindex(columns=LABELS)
+
+    r_t = preds[target].rank(pct=True)
+    r_d = preds[donor].rank(pct=True)
+
+    print(f"\n{target} borrowing {donor}  (keyword extractor, {len(labeled)} gold)")
+    print(f"{'w':>5} {target:>12} {'macro':>8}")
+    print("-" * 28)
+    for w in (0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.7, 1.0):
+        blended = preds.copy()
+        blended[target] = (1 - w) * r_t + w * r_d
+        macro, per = macro_auc(labeled[LABELS], blended)
+        mark = "   <- donor alone" if w == 1.0 else ""
+        print(f"{w:>5.1f} {per[target]:>12.3f} {macro:>8.3f}{mark}")
+    print("-" * 28)
+    print("w=0 is the extractor untouched; w=1 is the donor's ranking substituted")
+    print("wholesale. A real effect shows a smooth hump, not a single spike. With")
+    print(f"{int(labeled[target].sum())} positives in 58 studies, treat anything under 0.05 as noise.")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--data", type=Path, required=True, help="path to train.csv")
     ap.add_argument("--show-errors", action="store_true")
+    ap.add_argument("--borrow", nargs=2, metavar=("TARGET", "DONOR"),
+                    help="sweep blending DONOR's ranking into TARGET, e.g. Synovitis Effusion")
     args = ap.parse_args()
 
     train = pd.read_csv(args.data)
     labeled, unlabeled = gold_split(train)
     print(f"loaded {len(train)} studies: {len(labeled)} labeled, {len(unlabeled)} unlabeled")
     evaluate(keyword_extract, train, show_errors=args.show_errors)
+    if args.borrow:
+        borrow_sweep(train, args.borrow[0], args.borrow[1])
 
 
 if __name__ == "__main__":
