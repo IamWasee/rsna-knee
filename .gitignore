@@ -33,3 +33,7 @@ venv/
 
 # tooling state
 .claude-flow/
+
+# graphify: generated knowledge graph, rebuilt with `graphify update .`
+graphify-out/
+*.graphify-bak
