@@ -48,10 +48,16 @@ class KneeStudies(Dataset):
             return np.zeros(self.shape, dtype=np.uint8)
         vol = np.load(path)
         if vol.shape != self.shape:
-            fixed = np.zeros(self.shape, dtype=np.uint8)
-            s = tuple(slice(0, min(a, b)) for a, b in zip(vol.shape, self.shape))
-            fixed[s] = vol[s]
-            vol = fixed
+            # Never pad or crop into a mismatch. This previously took the top-left
+            # 224x224 of a 256px cache and zero-filled three missing slices, which
+            # cost a submission 0.06 AUC with nothing in the log to show for it.
+            # A cache built with different settings than the checkpoint expects is
+            # a configuration error, not something to paper over.
+            raise ValueError(
+                f"cache/checkpoint mismatch for {study_id}: cache has {vol.shape}, "
+                f"model expects {self.shape}. Rebuild the cache with the same "
+                f"--slots/--size the checkpoint was trained with."
+            )
         return vol
 
     def _augment(self, vol: np.ndarray) -> np.ndarray:

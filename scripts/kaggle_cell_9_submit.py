@@ -126,9 +126,25 @@ for w in WEIGHTS:
 
 CACHE = "/kaggle/working/test_cache"
 
+# Preprocess with the settings the checkpoint was TRAINED with, not today's
+# defaults. A cache built to a different shape used to be silently cropped and
+# zero-padded to fit, which fed the model a corner of each knee plus blank slices.
+import torch
+_ck = torch.load(sorted(glob.glob(f"{WDIR}/*.pt"))[0], map_location="cpu",
+                 weights_only=False)
+_a = _ck.get("args", {})
+SLOTS = _a.get("slots", _a.get("n_series", 4))
+SIZE = _a.get("size", 256)
+print(f"checkpoint expects: slots={SLOTS} n_slices={_a.get('n_slices')} size={SIZE}")
+if _a.get("n_slices") not in (9, None):
+    print(f"  WARNING: this checkpoint wants {_a['n_slices']} slices per slot, but "
+          f"preprocess.py now produces 9. These weights predate the v2 layout and "
+          f"cannot be served correctly by the current pipeline -- retrain instead.")
+
 # 1. Preprocess the hidden test set. Measured at 2.73 studies/sec with 4 workers,
 #    so even 20,000 studies is ~2h of the 9h budget.
-!python $SRC/preprocess.py --out $CACHE --split test --workers 4
+!python $SRC/preprocess.py --out $CACHE --split test --workers 4 \
+    --slots $SLOTS --size $SIZE
 print(f"preprocess: {(time.time()-t0)/60:.1f} min")
 
 # 2. Predict and write submission.csv at the path Kaggle expects.
