@@ -17,22 +17,65 @@ CODE = "/kaggle/working/rsna-knee"
 sys.path.insert(0, f"{CODE}/src")
 
 import pandas as pd
-TRAIN = next(iter(glob.glob("/kaggle/input/**/train.csv", recursive=True)))
 
-# Prefer the v2 cache. Both may be attached and they have different shapes, so
-# picking the wrong one fails at the first batch rather than silently.
-npys = glob.glob("/kaggle/input/**/*.npy", recursive=True)
+
+def find(filename: str = "", suffix: str = "") -> list[str]:
+    """Search the attached inputs without descending the DICOM archive.
+
+    A recursive glob over /kaggle/input walks hundreds of thousands of DICOM files
+    -- it spent 623 seconds here before failing. followlinks=True matters because
+    Kaggle mounts notebook outputs as symlinks.
+    """
+    hits = []
+    for root, dirs, files in os.walk("/kaggle/input", followlinks=True):
+        dirs[:] = [d for d in dirs
+                   if "rsna-knee-abnormality-detection" not in os.path.join(root, d)]
+        for f in files:
+            if (filename and f == filename) or (suffix and f.endswith(suffix)):
+                hits.append(os.path.join(root, f))
+                if suffix and len(hits) > 50:      # enough to identify the dir
+                    return hits
+    return hits
+
+
+TRAIN = next(iter(glob.glob("/kaggle/input/competitions/**/train.csv", recursive=True)))
+
+# Prefer the v2 cache. Both may be attached and their tensor shapes differ, so
+# training on the wrong one now raises at the first batch instead of reshaping.
+npys = find(suffix=".npy")
 v2 = [f for f in npys if "cache_v2" in f]
-CACHE = os.path.dirname((v2 or npys)[0])
-print(f"cache: {CACHE}  ({len([f for f in npys if os.path.dirname(f) == CACHE])} volumes)")
+if not npys:
+    print("NO .npy CACHE FOUND. What is attached:")
+    for root, dirs, files in os.walk("/kaggle/input", followlinks=True):
+        if "rsna-knee-abnormality-detection" in root:
+            dirs[:] = []
+            continue
+        depth = root.count(os.sep) - 2
+        if depth > 4:
+            dirs[:] = []
+            continue
+        print("  " * depth + os.path.basename(root) + "/")
+        for f in files[:5]:
+            print("  " * (depth + 1) + f)
+    raise SystemExit(
+        "Attach the Preprocessing v2 notebook's output. If it is attached, its\n"
+        "LATEST version has no cache_v2 -- pin the version that produced it\n"
+        "(Version History -> ... -> Pin as default version), then re-add the input."
+    )
+
+CACHE = os.path.dirname(v2[0] if v2 else npys[0])
+print(f"cache: {CACHE}")
 if "cache_v2" not in CACHE:
-    print("  WARNING: this is the v1 cache. Attach the v2 preprocessing notebook.")
+    print("  WARNING: this looks like the v1 cache (3 series, 12 slices, 224px).")
+    print("  Training will raise a shape mismatch. Attach the v2 notebook instead.")
 
 # Regenerate labels with the current extractor. The saved report_labels.csv predates
 # severity grading, which lifted keyword macro AUC from 0.707 to 0.725 -- it costs
 # seconds to redo and the model can only be as good as its targets.
-PREDS = max(glob.glob("/kaggle/input/**/model_preds_all.csv", recursive=True),
-            key=lambda f: len(pd.read_csv(f)))
+cands = find(filename="model_preds_all.csv")
+if not cands:
+    raise SystemExit("model_preds_all.csv not found -- attach the labelling notebook.")
+PREDS = max(cands, key=lambda f: len(pd.read_csv(f)))
 print(f"model preds: {PREDS} ({len(pd.read_csv(PREDS))} studies)")
 
 !python $CODE/src/ensemble.py --data "$TRAIN" --model-preds "$PREDS" \
