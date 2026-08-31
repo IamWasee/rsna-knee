@@ -38,7 +38,10 @@ def load_models(weights: Path, device: str) -> tuple[list, dict]:
         cfg = ck["args"]
         # pretrained=False: the weights are in the checkpoint, and there is no
         # internet here to fetch them from anyway.
-        m = KneeModel(cfg["backbone"], len(LABELS), pretrained=False).to(device)
+        m = KneeModel(cfg["backbone"], LABELS, pretrained=False,
+                      head=cfg.get("head", "shared"), pool=cfg.get("pool", "gap"),
+                      n_slot=cfg.get("slots", 4),
+                      groups_per_slot=cfg.get("n_slices", 9) // 3).to(device)
         m.load_state_dict(ck["model"])
         m.eval()
         models.append(m)

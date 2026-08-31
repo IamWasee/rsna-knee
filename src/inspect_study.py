@@ -67,7 +67,10 @@ def main() -> None:
     for c in ckpts:
         ck = torch.load(c, map_location=device, weights_only=False)
         cfg = ck["args"]
-        m = KneeModel(cfg["backbone"], len(LABELS), pretrained=False).to(device)
+        m = KneeModel(cfg["backbone"], LABELS, pretrained=False,
+                      head=cfg.get("head", "shared"), pool=cfg.get("pool", "gap"),
+                      n_slot=cfg.get("slots", 4),
+                      groups_per_slot=cfg.get("n_slices", 9) // 3).to(device)
         m.load_state_dict(ck["model"])
         m.eval()
         models.append(m)

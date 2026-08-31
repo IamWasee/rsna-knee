@@ -129,7 +129,9 @@ def train_fold(args, tr: pd.DataFrame, va: pd.DataFrame, gold: pd.DataFrame,
     gold_dl = DataLoader(KneeStudies(gold, train=False, **ds_kw),
                          batch_size=args.batch, **dl_kw)
 
-    model = KneeModel(args.backbone, len(LABELS), pretrained=args.pretrained).to(device)
+    model = KneeModel(args.backbone, LABELS, pretrained=args.pretrained,
+                      head=args.head, pool=args.pool, n_slot=args.slots,
+                      groups_per_slot=args.n_slices // 3).to(device)
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-2)
     sched = torch.optim.lr_scheduler.OneCycleLR(
         opt, max_lr=args.lr, total_steps=args.epochs * len(tr_dl), pct_start=0.1)
@@ -188,6 +190,12 @@ def main() -> None:
     ap.add_argument("--slots", type=int, default=4)
     ap.add_argument("--n-slices", type=int, default=9)
     ap.add_argument("--size", type=int, default=256)
+    ap.add_argument("--head", default="slot", choices=["slot", "shared"],
+                    help="slot: one attention query per diagnosis over sequence types; "
+                         "shared: a single attention for all twelve labels")
+    ap.add_argument("--pool", default="focal", choices=["focal", "gap"],
+                    help="focal keeps the upper tail of each channel alongside the mean, "
+                         "so a small lesion is not averaged away")
     ap.add_argument("--no-pretrained", dest="pretrained", action="store_false")
     ap.add_argument("--no-sharpen", dest="sharpen", action="store_false",
                     help="train on raw ensemble scores (compressed toward 0.5)")

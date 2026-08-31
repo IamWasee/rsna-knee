@@ -27,6 +27,10 @@ from config import ID_COL, LABELS  # noqa: E402
 MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
 STD = np.array([0.229, 0.224, 0.225], dtype=np.float32)
 GROUP = 3
+AUG_ROT_DEG = 8.0
+AUG_SCALE = 0.08
+AUG_SHIFT = 0.05
+AUG_INTENSITY = 0.10
 
 
 class KneeStudies(Dataset):
@@ -61,18 +65,43 @@ class KneeStudies(Dataset):
         return vol
 
     def _augment(self, vol: np.ndarray) -> np.ndarray:
-        """Light augmentation only.
+        """Rigid jitter and an intensity scale. Neither flip, for two reasons.
 
-        No horizontal flip: medial and lateral are separate labels and a flip
-        swaps them, corrupting four of the twelve targets.
+        Horizontal: medial and lateral are separate labels and a mirror swaps them,
+        corrupting four of the twelve targets.
+
+        Vertical: a knee is acquired in a canonical orientation and no study looks
+        like its own vertical mirror. Augmentation should cover directions the label
+        is invariant to; this one moves the input off the distribution entirely. Where
+        a finding sits in the frame is also information -- a Baker's cyst is identified
+        by lying in the popliteal fossa, not by appearance alone.
+
+        Zoom in only. Edge padding repeats the border outward, and the border of this
+        crop is where the popliteal fossa sits, so zooming out fabricates tissue
+        exactly where a Baker's cyst is looked for.
         """
+        import cv2
+
+        x = vol.astype(np.float32)
+        if np.random.rand() < 0.8:
+            h, w = x.shape[-2:]
+            ang = np.random.uniform(-AUG_ROT_DEG, AUG_ROT_DEG)
+            sc = 1.0 + np.random.uniform(0, AUG_SCALE)          # never below 1.0
+            tx = np.random.uniform(-AUG_SHIFT, AUG_SHIFT) * w
+            ty = np.random.uniform(-AUG_SHIFT, AUG_SHIFT) * h
+            M = cv2.getRotationMatrix2D((w / 2, h / 2), ang, sc)
+            M[0, 2] += tx
+            M[1, 2] += ty
+            flat = x.reshape(-1, h, w)
+            for i in range(flat.shape[0]):
+                flat[i] = cv2.warpAffine(flat[i], M, (w, h),
+                                         flags=cv2.INTER_LINEAR,
+                                         borderMode=cv2.BORDER_REPLICATE)
+            x = flat.reshape(x.shape)
+
         if np.random.rand() < 0.5:
-            vol = np.clip(vol.astype(np.float32) * np.random.uniform(0.85, 1.15)
-                          + np.random.uniform(-15, 15), 0, 255).astype(np.uint8)
-        if np.random.rand() < 0.3:
-            dx, dy = np.random.randint(-10, 11, 2)
-            vol = np.roll(vol, (dy, dx), axis=(-2, -1))
-        return vol
+            x *= 1.0 + np.random.uniform(-AUG_INTENSITY, AUG_INTENSITY)
+        return np.clip(x, 0, 255).astype(np.uint8)
 
     def __getitem__(self, i: int):
         row = self.df.iloc[i]
