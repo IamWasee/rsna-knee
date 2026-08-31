@@ -88,7 +88,6 @@ else:
         raise SystemExit("no label table found -- attach the labels dataset.")
     PREDS = max(cands, key=lambda f: len(pd.read_csv(f)))
     print(f"labels: regenerating from {PREDS} (ours, 0.725)")
-print(f"model preds: {PREDS} ({len(pd.read_csv(PREDS))} studies)")
 
 if PREDS is not None:
     !python $CODE/src/ensemble.py --data "$TRAIN" --model-preds "$PREDS" \
