@@ -72,21 +72,43 @@ if "cache_v2" not in CACHE:
 # Regenerate labels with the current extractor. The saved report_labels.csv predates
 # severity grading, which lifted keyword macro AUC from 0.707 to 0.725 -- it costs
 # seconds to redo and the model can only be as good as its targets.
-cands = find(filename="model_preds_all.csv")
-if not cands:
-    raise SystemExit("model_preds_all.csv not found -- attach the labelling notebook.")
-PREDS = max(cands, key=lambda f: len(pd.read_csv(f)))
+# Label source. Measured on the 58 annotated studies:
+#   ours (rule-based)            0.725
+#   steven llm_labels_v4_blend   0.893
+# Labels cap everything downstream, so prefer the published table when attached and
+# fall back to regenerating ours only if it is not.
+best = find(filename="llm_labels_v4_blend.csv")
+PREDS = None
+if best:
+    LABELS_CSV = best[0]
+    print(f"labels: {LABELS_CSV}  (published, 0.893 on the annotated 58)")
+else:
+    cands = find(filename="model_preds_all.csv")
+    if not cands:
+        raise SystemExit("no label table found -- attach the labels dataset.")
+    PREDS = max(cands, key=lambda f: len(pd.read_csv(f)))
+    print(f"labels: regenerating from {PREDS} (ours, 0.725)")
 print(f"model preds: {PREDS} ({len(pd.read_csv(PREDS))} studies)")
 
-!python $CODE/src/ensemble.py --data "$TRAIN" --model-preds "$PREDS" \
-    --method mean --out /kaggle/working/report_labels_v2.csv
+if PREDS is not None:
+    !python $CODE/src/ensemble.py --data "$TRAIN" --model-preds "$PREDS" \
+        --method mean --out /kaggle/working/report_labels_v2.csv
+    LABELS_CSV = "/kaggle/working/report_labels_v2.csv"
 
-LABELS = "/kaggle/working/report_labels_v2.csv"
+LABELS = LABELS_CSV
+import pandas as pd
+_l = pd.read_csv(LABELS)
+print(f"label table: {len(_l)} studies, columns {list(_l.columns)[:4]}...")
 
 # v2 feeds 12 encoder inputs per study (4 slots x 3 triplets) against v1's 36,
 # so each step is cheaper despite the larger images -- batch 8 fits.
+# Identical to the previous run in every respect except the label table, so the
+# difference is attributable. Head and pooling stay on the old behaviour for the
+# same reason -- they get their own run.
 !python $CODE/src/train.py --cache "$CACHE" --labels "$LABELS" \
-    --epochs 6 --batch 8 --backbone resnet34 --out /kaggle/working/weights_v2
+    --epochs 6 --batch 8 --backbone resnet34 \
+    --head shared --pool gap \
+    --out /kaggle/working/weights_v2
 
 print("\ncheckpoints:", sorted(glob.glob("/kaggle/working/weights_v2/*.pt")))
 print("Save this notebook's output, then attach it to the submission notebook.")
