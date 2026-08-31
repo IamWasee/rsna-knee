@@ -105,11 +105,15 @@ if PREDS is not None:
 
 LABELS = LABELS_CSV
 
-# Identical to the previous run in every respect except the label table, so the
-# difference is attributable. Head and pooling stay on the old behaviour for the
-# same reason -- they get their own run.
+# 6 -> 12 epochs, nothing else changed. At six every fold was still improving
+# (fold2 0.746->0.747, fold3 0.742->0.743, fold4 0.756->0.757), so the schedule was
+# cutting training off rather than converging it. Six was tuned when the labels were
+# noisy; a cleaner target has more signal to extract before it starts memorising.
+#
+# Sharpening also stays on for this run despite reducing spread (0.349 -> 0.312) on
+# this label table -- turning it off is a second variable and gets its own run.
 !python $CODE/src/train.py --cache "$CACHE" --labels "$LABELS" \
-    --epochs 6 --batch 8 --backbone resnet34 \
+    --epochs 12 --batch 8 --backbone resnet34 \
     --head shared --pool gap \
     --out /kaggle/working/weights_v2
 
