@@ -120,7 +120,7 @@ class KneeModel(nn.Module):
         if head == "slot":
             self.head = SlotHead(feat, n_slot, labels)
         else:
-            self.pool_shared = AttentionPool(feat)
+            self.pool = AttentionPool(feat)   # name kept: old checkpoints load
             self.head = nn.Sequential(nn.Dropout(dropout), nn.Linear(feat, len(labels)))
 
     def forward(self, x: torch.Tensor, return_attention: bool = False):
@@ -140,7 +140,7 @@ class KneeModel(nn.Module):
             feats = feats.view(b, self.n_slot, self.groups, -1).mean(2)
             logits, attn = self.head(feats)
         else:
-            pooled, attn = self.pool_shared(feats)
+            pooled, attn = self.pool(feats)
             logits = self.head(pooled)
         return (logits, attn) if return_attention else logits
 

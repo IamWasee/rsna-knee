@@ -1,11 +1,13 @@
 # ============================================================
-# RSNA Knee — Retrain on preprocessing v2 + regraded labels
+# RSNA Knee — Train on the published label table
 #
-# Attach FOUR inputs:
+# Attach THREE inputs:
 #   1. the competition
 #   2. Notebook Output -> the v2 preprocessing notebook (cache_v2)
-#   3. Notebook Output -> the labelling notebook (model_preds_all.csv)
-#   4. nothing else needed -- labels are regenerated here, not reused
+#   3. Dataset -> stevenleehans/rsna-knee-llm-report-labels
+#
+# Measured on the 58 annotated studies: our labels 0.725, this table 0.893. Only the
+# label source changes from the previous run, so the difference is attributable.
 #
 # GPU on, Internet on. Delete Kaggle's os.walk starter cell.
 # ============================================================
@@ -38,7 +40,17 @@ def find(filename: str = "", suffix: str = "") -> list[str]:
     return hits
 
 
-TRAIN = next(iter(glob.glob("/kaggle/input/competitions/**/train.csv", recursive=True)))
+def competition_file(name: str) -> str:
+    """train.csv sits one level inside the competition mount; '**' from there would
+    walk train_series/ as well, which is the archive we are trying not to touch."""
+    for root, dirs, files in os.walk("/kaggle/input/competitions", followlinks=True):
+        dirs[:] = [d for d in dirs if d not in ("train_series", "test_series")]
+        if name in files:
+            return os.path.join(root, name)
+    raise SystemExit(f"{name} not found -- is the competition attached?")
+
+
+TRAIN = competition_file("train.csv")
 
 # Prefer the v2 cache. Both may be attached and their tensor shapes differ, so
 # training on the wrong one now raises at the first batch instead of reshaping.
@@ -69,9 +81,6 @@ if "cache_v2" not in CACHE:
     print("  WARNING: this looks like the v1 cache (3 series, 12 slices, 224px).")
     print("  Training will raise a shape mismatch. Attach the v2 notebook instead.")
 
-# Regenerate labels with the current extractor. The saved report_labels.csv predates
-# severity grading, which lifted keyword macro AUC from 0.707 to 0.725 -- it costs
-# seconds to redo and the model can only be as good as its targets.
 # Label source. Measured on the 58 annotated studies:
 #   ours (rule-based)            0.725
 #   steven llm_labels_v4_blend   0.893
@@ -95,12 +104,7 @@ if PREDS is not None:
     LABELS_CSV = "/kaggle/working/report_labels_v2.csv"
 
 LABELS = LABELS_CSV
-import pandas as pd
-_l = pd.read_csv(LABELS)
-print(f"label table: {len(_l)} studies, columns {list(_l.columns)[:4]}...")
 
-# v2 feeds 12 encoder inputs per study (4 slots x 3 triplets) against v1's 36,
-# so each step is cheaper despite the larger images -- batch 8 fits.
 # Identical to the previous run in every respect except the label table, so the
 # difference is attributable. Head and pooling stay on the old behaviour for the
 # same reason -- they get their own run.

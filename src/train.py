@@ -70,13 +70,77 @@ def sharpen(df: pd.DataFrame, k: float = 8.0) -> pd.DataFrame:
     return out
 
 
+ID_ALIASES = ["StudyInstanceUID", "study_instance_uid", "studyinstanceuid",
+              "study_id", "StudyID", "study", "id"]
+
+
+def normalise_label_table(path: Path) -> pd.DataFrame:
+    """Load a label table from any source and fail loudly if it will not train.
+
+    Published tables do not share a convention: the id column may be named
+    differently, the twelve targets may carry suffixes, extra confidence columns may
+    ride along, and values may be hard 0/1 or soft. Any of those silently becomes a
+    KeyError deep in the loop or, worse, a NaN loss that trains to nothing.
+    """
+    df = pd.read_csv(path)
+
+    id_col = next((c for c in df.columns if c.strip() in ID_ALIASES), None)
+    if id_col is None:
+        raise SystemExit(f"no study-id column in {path.name}. Columns: {list(df.columns)}")
+    if id_col != ID_COL:
+        print(f"  id column '{id_col}' -> '{ID_COL}'")
+        df = df.rename(columns={id_col: ID_COL})
+
+    # Tolerate case and whitespace differences in the target names, nothing more.
+    lookup = {c.strip().lower(): c for c in df.columns}
+    rename, missing = {}, []
+    for t in LABELS:
+        hit = lookup.get(t.lower())
+        if hit is None:
+            missing.append(t)
+        elif hit != t:
+            rename[hit] = t
+    if missing:
+        raise SystemExit(
+            f"{path.name} is missing {len(missing)} of the 12 targets: {missing}\n"
+            f"columns present: {list(df.columns)}"
+        )
+    df = df.rename(columns=rename)[[ID_COL] + LABELS]
+
+    for c in LABELS:
+        df[c] = pd.to_numeric(df[c], errors="coerce")
+    n_nan = int(df[LABELS].isna().sum().sum())
+    if n_nan:
+        # A NaN target makes the loss NaN and the run trains to nothing while
+        # reporting a plausible-looking curve. Fill with the label's own mean.
+        print(f"  {n_nan} non-numeric/missing values -> filled with per-label mean")
+        df[LABELS] = df[LABELS].fillna(df[LABELS].mean())
+
+    lo, hi = float(df[LABELS].min().min()), float(df[LABELS].max().max())
+    if lo < -0.01 or hi > 1.01:
+        print(f"  values span [{lo:.2f}, {hi:.2f}] -> rescaling each label to [0,1]")
+        rng = df[LABELS].max() - df[LABELS].min()
+        df[LABELS] = (df[LABELS] - df[LABELS].min()) / rng.replace(0, 1)
+    hard = bool(((df[LABELS] == 0) | (df[LABELS] == 1)).all().all())
+    print(f"  {len(df)} rows, values in [{lo:.2f}, {hi:.2f}]"
+          f"{', hard 0/1' if hard else ', soft'}")
+    return df
+
+
 def build_labels(args) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Training frame (report-derived) and gold frame (58 radiologist-labelled)."""
     train = pd.read_csv(data_root() / "train.csv")
     gold = train[train[LABELS].notna().all(axis=1)][[ID_COL] + LABELS].copy()
 
-    derived = pd.read_csv(args.labels)
+    derived = normalise_label_table(Path(args.labels))
     derived = derived[~derived[ID_COL].isin(gold[ID_COL])]
+
+    overlap = derived[ID_COL].isin(train[ID_COL]).mean()
+    if overlap < 0.9:
+        raise SystemExit(
+            f"only {overlap:.0%} of the label table's study ids appear in train.csv -- "
+            "wrong table, or ids in a different format."
+        )
 
     # A study missing from the cache silently trains on a zero-filled volume, which
     # looks like a hard example rather than a bug. Check coverage up front.
