@@ -33,6 +33,13 @@ from model import KneeModel, build_loss  # noqa: E402
 from paths import data_root  # noqa: E402
 
 
+def _cache_manifest(cache) -> dict:
+    """Whatever built this cache, recorded so inference can prove it matches."""
+    import json
+    p = Path(cache) / "cache_manifest.json"
+    return json.loads(p.read_text()) if p.exists() else {}
+
+
 def macro_auc(y_true: np.ndarray, y_pred: np.ndarray) -> tuple[float, dict]:
     from sklearn.metrics import roc_auc_score
 
@@ -127,6 +134,35 @@ def normalise_label_table(path: Path) -> pd.DataFrame:
     return df
 
 
+def report_oof(oof: pd.DataFrame, path: Path) -> None:
+    """Per-label AUC over the pooled out-of-fold predictions, plus the file itself.
+
+    Saved because the metric is a macro average: choosing ensemble weights, blending
+    sources or tuning anything per label needs the predictions, not a summary. The
+    targets here are the report-derived labels, so this measures agreement with the
+    teacher -- read it for which labels are learnable from these images, and the
+    annotated 58 for whether the teacher was right.
+    """
+    train = pd.read_csv(data_root() / "train.csv")
+    y = train.set_index(ID_COL).reindex(oof[ID_COL])
+    oof.to_csv(path, index=False)
+
+    print(f"\n{'label':<18} {'OOF AUC':>8} {'pos rate':>9}")
+    print("-" * 38)
+    aucs = []
+    for c in LABELS:
+        t = (y[c] > 0.5).astype(int).values if c in y else None
+        if t is None or len(set(t)) < 2:
+            print(f"{c:<18} {'--':>8}"); continue
+        from sklearn.metrics import roc_auc_score
+        a = roc_auc_score(t, oof[c].values)
+        aucs.append(a)
+        print(f"{c:<18} {a:>8.3f} {t.mean():>9.3f}")
+    print("-" * 38)
+    print(f"{'MACRO':<18} {np.mean(aucs):>8.3f}   ({len(oof)} studies)")
+    print(f"\nwrote {path} -- per-label ensemble weights and blending need this file.")
+
+
 def build_labels(args) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Training frame (report-derived) and gold frame (58 radiologist-labelled)."""
     train = pd.read_csv(data_root() / "train.csv")
@@ -134,6 +170,18 @@ def build_labels(args) -> tuple[pd.DataFrame, pd.DataFrame]:
 
     derived = normalise_label_table(Path(args.labels))
     derived = derived[~derived[ID_COL].isin(gold[ID_COL])]
+
+    # Group duplicate report texts. train.csv has 4,407 studies but fewer unique
+    # reports; identical text is the same patient or a repeated study, and plain
+    # KFold would put the pair either side of the split. There is no patient id in
+    # this dataset, so the report is the only grouping key available.
+    text = train.set_index(ID_COL)["Report"].astype(str)
+    derived["_group"] = derived[ID_COL].map(
+        lambda i: hash(text.get(i, i)) if i in text.index else hash(i))
+    n_dup = len(derived) - derived["_group"].nunique()
+    if n_dup:
+        print(f"  {n_dup} studies share a report with another study -- grouped so "
+              f"they cannot straddle a fold boundary")
 
     overlap = derived[ID_COL].isin(train[ID_COL]).mean()
     if overlap < 0.9:
@@ -210,7 +258,7 @@ def train_fold(args, tr: pd.DataFrame, va: pd.DataFrame, gold: pd.DataFrame,
     scaler = torch.amp.GradScaler(enabled=(device == "cuda"))
     criterion = build_loss()
 
-    best = -1.0
+    best, best_oof = -1.0, None
     for epoch in range(args.epochs):
         model.train()
         t0, total = time.time(), 0.0
@@ -228,23 +276,31 @@ def train_fold(args, tr: pd.DataFrame, va: pd.DataFrame, gold: pd.DataFrame,
                 print(f"  fold{fold} ep{epoch} {i+1}/{len(tr_dl)} "
                       f"loss {total/(i+1):.4f}", flush=True)
 
-        # Two scores, and only one of them is trustworthy.
+        # Selection runs on this fold's own held-out studies. Selecting on the 58
+        # annotated studies instead meant 60 choices against one small set -- the
+        # resulting number is a fitted value, not a held-out one, and it is why the
+        # reported score moved further than the leaderboard did.
         vp, vy = evaluate(model, va_dl, device)
-        val_auc, _ = macro_auc((vy > 0.5).astype(int), vp)
+        val_auc, val_per = macro_auc((vy > 0.5).astype(int), vp)
         gp, gy = evaluate(model, gold_dl, device)
-        gold_auc, per = macro_auc(gy.astype(int), gp)
+        gold_auc, gold_per = macro_auc(gy.astype(int), gp)
 
         print(f"  fold{fold} ep{epoch}  loss {total/len(tr_dl):.4f}  "
-              f"derived-val {val_auc:.3f}  GOLD {gold_auc:.3f}  ({time.time()-t0:.0f}s)")
+              f"OOF {val_auc:.3f}  gold {gold_auc:.3f}  ({time.time()-t0:.0f}s)")
 
-        if gold_auc > best:
-            best = gold_auc
-            print("    per-label GOLD: " + "  ".join(
-                f"{c.split()[0][:4]} {per[c]:.2f}" for c in LABELS))
+        if val_auc > best:
+            best = val_auc
+            best_oof = pd.DataFrame(vp, columns=LABELS)
+            best_oof.insert(0, ID_COL, va[ID_COL].values)
+            best_oof["fold"] = fold
+            print("    per-label OOF: " + "  ".join(
+                f"{c.split()[0][:4]} {val_per[c]:.2f}" for c in LABELS))
             torch.save({"model": model.state_dict(), "fold": fold,
-                        "gold_auc": gold_auc, "per_label": per, "args": vars(args)},
+                        "oof_auc": val_auc, "gold_auc": gold_auc,
+                        "per_label": val_per, "gold_per_label": gold_per,
+                        "args": vars(args), "cache_manifest": _cache_manifest(args.cache)},
                        Path(args.out) / f"fold{fold}.pt")
-    return best
+    return best, best_oof
 
 
 def main() -> None:
@@ -292,22 +348,29 @@ def main() -> None:
 
     # Plain KFold: the labels are soft, so there is nothing discrete to stratify on,
     # and studies are independent (one exam each, no patient-level leakage to guard).
-    from sklearn.model_selection import KFold
-    kf = KFold(args.folds, shuffle=True, random_state=args.seed)
+    from sklearn.model_selection import GroupKFold
+    kf = GroupKFold(args.folds)
 
-    scores = []
-    for fold, (ti, vi) in enumerate(kf.split(derived)):
+    scores, oof = [], []
+    for fold, (ti, vi) in enumerate(kf.split(derived, groups=derived["_group"])):
         if args.only_fold is not None and fold != args.only_fold:
             continue
-        s = train_fold(args, derived.iloc[ti], derived.iloc[vi], gold, fold, device)
+        s, fold_oof = train_fold(args, derived.iloc[ti], derived.iloc[vi], gold,
+                                 fold, device)
         scores.append(s)
-        print(f"fold {fold} best GOLD macro AUC: {s:.3f}\n")
+        oof.append(fold_oof)
+        print(f"fold {fold} best OOF macro AUC: {s:.3f}\n")
+
+    if oof:
+        report_oof(pd.concat(oof, ignore_index=True), Path(args.out) / "oof.csv")
 
     if scores:
-        print(f"mean best GOLD macro AUC: {np.mean(scores):.3f}")
-        print("\nGOLD is 58 studies. It is the only radiologist-labelled signal available,")
-        print("and it is far too small to separate close models -- use it to catch")
-        print("failures, and the leaderboard to rank what survives.")
+        print(f"mean best OOF macro AUC: {np.mean(scores):.3f}")
+        print("\nOOF is measured on each fold's own held-out studies against the")
+        print("report-derived labels, so it is honest but only as good as those labels.")
+        print("The 58 annotated studies are reported alongside as a second opinion and")
+        print("are no longer used to choose checkpoints -- 60 selections against 58")
+        print("studies fits them rather than measuring them.")
 
 
 if __name__ == "__main__":

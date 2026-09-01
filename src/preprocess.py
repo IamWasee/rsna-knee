@@ -220,6 +220,17 @@ def main() -> None:
             if done % 200 == 0:
                 print(f"  {done}/{len(jobs)}  ({failed} failed)", flush=True)
 
+    # Record how this cache was built. The checkpoint stores a copy, and inference
+    # compares the two: a cache built with different constants is the failure that
+    # silently served corner crops and blank slices to a model expecting neither.
+    import json
+    manifest = {"slots": args.slots, "size": args.size, "crop_mm": args.crop_mm,
+                "n_anchors": N_ANCHORS, "group": GROUP,
+                "n_slices": N_ANCHORS * GROUP, "band": [0.15, 0.85],
+                "slot_scheme": [list(x) for x in SLOTS[:args.slots]], "split": args.split}
+    (args.out / "cache_manifest.json").write_text(json.dumps(manifest, indent=2))
+    print("manifest:", json.dumps(manifest))
+
     print(f"\ndone: {done - failed} written, {failed} failed")
 
 

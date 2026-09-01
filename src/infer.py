@@ -32,10 +32,11 @@ def load_models(weights: Path, device: str) -> tuple[list, dict]:
     if not ckpts:
         raise FileNotFoundError(f"no .pt checkpoints in {weights}")
 
-    models, cfg = [], {}
+    models, cfg, manifest = [], {}, {}
     for p in ckpts:
         ck = torch.load(p, map_location=device, weights_only=False)
         cfg = ck["args"]
+        manifest = ck.get("cache_manifest", manifest)
         # pretrained=False: the weights are in the checkpoint, and there is no
         # internet here to fetch them from anyway.
         m = KneeModel(cfg["backbone"], LABELS, pretrained=False,
@@ -46,8 +47,37 @@ def load_models(weights: Path, device: str) -> tuple[list, dict]:
         m.load_state_dict(ck["model"])
         m.eval()
         models.append(m)
-        print(f"  {p.name}  gold_auc={ck.get('gold_auc', float('nan')):.3f}")
-    return models, cfg
+        print(f"  {p.name}  oof={ck.get('oof_auc', float('nan')):.3f} "
+              f"gold={ck.get('gold_auc', float('nan')):.3f}")
+    return models, cfg, manifest
+
+
+def check_parity(train_manifest: dict, cache: Path) -> None:
+    """Refuse to infer from a cache built differently from the training one.
+
+    A silent mismatch here previously served the model the top-left corner of each
+    study plus blank slices and still produced a plausible submission -- it scored
+    0.675 with nothing in the log to say why. Every field that changes the pixels is
+    compared, not just the ones that change the tensor shape.
+    """
+    import json
+
+    p = cache / "cache_manifest.json"
+    if not train_manifest:
+        print("  checkpoint predates cache manifests -- parity NOT verified")
+        return
+    if not p.exists():
+        raise SystemExit(f"no cache_manifest.json in {cache}; cannot verify parity")
+
+    test = json.loads(p.read_text())
+    fields = ["slots", "size", "crop_mm", "n_anchors", "group", "n_slices", "band"]
+    bad = [(f, train_manifest.get(f), test.get(f)) for f in fields
+           if train_manifest.get(f) != test.get(f)]
+    if bad:
+        lines = "\n".join(f"    {f}: trained on {a!r}, test cache has {b!r}"
+                          for f, a, b in bad)
+        raise SystemExit("cache/checkpoint preprocessing mismatch:\n" + lines)
+    print(f"  preprocessing parity verified ({len(fields)} fields match)")
 
 
 @torch.no_grad()
@@ -82,7 +112,8 @@ def main() -> None:
     test = pd.read_csv(root / "test.csv")
     print(f"{len(test)} test studies")
 
-    models, cfg = load_models(args.weights, device)
+    models, cfg, train_manifest = load_models(args.weights, device)
+    check_parity(train_manifest, args.cache)
 
     ds = KneeStudies(test, cache=args.cache, train=False,
                      slots=cfg.get("slots", 4),

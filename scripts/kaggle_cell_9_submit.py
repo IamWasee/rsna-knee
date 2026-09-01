@@ -133,8 +133,14 @@ import torch
 _ck = torch.load(sorted(glob.glob(f"{WDIR}/*.pt"))[0], map_location="cpu",
                  weights_only=False)
 _a = _ck.get("args", {})
-SLOTS = _a.get("slots", _a.get("n_series", 4))
-SIZE = _a.get("size", 256)
+_man = _ck.get("cache_manifest", {})
+# Prefer the manifest: it records what actually built the training cache, where
+# args records only what was asked for.
+SLOTS = _man.get("slots", _a.get("slots", _a.get("n_series", 4)))
+SIZE = _man.get("size", _a.get("size", 256))
+CROP = _man.get("crop_mm", 140.0)
+print(f"training cache: slots={SLOTS} size={SIZE} crop_mm={CROP} "
+      f"n_slices={_man.get('n_slices', _a.get('n_slices'))}")
 print(f"checkpoint expects: slots={SLOTS} n_slices={_a.get('n_slices')} size={SIZE}")
 if _a.get("n_slices") not in (9, None):
     print(f"  WARNING: this checkpoint wants {_a['n_slices']} slices per slot, but "
@@ -144,7 +150,7 @@ if _a.get("n_slices") not in (9, None):
 # 1. Preprocess the hidden test set. Measured at 2.73 studies/sec with 4 workers,
 #    so even 20,000 studies is ~2h of the 9h budget.
 !python $SRC/preprocess.py --out $CACHE --split test --workers 4 \
-    --slots $SLOTS --size $SIZE
+    --slots $SLOTS --size $SIZE --crop-mm $CROP
 print(f"preprocess: {(time.time()-t0)/60:.1f} min")
 
 # 2. Predict and write submission.csv at the path Kaggle expects.
