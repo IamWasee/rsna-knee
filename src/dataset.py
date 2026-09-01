@@ -24,6 +24,8 @@ from torch.utils.data import Dataset
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from config import ID_COL, LABELS  # noqa: E402
 
+CONF = [f"{c}__conf" for c in LABELS]
+
 MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
 STD = np.array([0.229, 0.224, 0.225], dtype=np.float32)
 GROUP = 3
@@ -41,6 +43,7 @@ class KneeStudies(Dataset):
         self.train = train
         self.shape = (slots, n_slices, size, size)
         self.has_labels = all(c in df.columns for c in LABELS)
+        self.has_conf = all(c in df.columns for c in CONF)
 
     def __len__(self) -> int:
         return len(self.df)
@@ -117,4 +120,9 @@ class KneeStudies(Dataset):
 
         if not self.has_labels:
             return x, row[ID_COL]
-        return x, torch.tensor(row[LABELS].values.astype(np.float32))
+        y = torch.tensor(row[LABELS].values.astype(np.float32))
+        # Uniform weights when the table carries no confidence, so the training loop
+        # has one code path either way.
+        w = (torch.tensor(row[CONF].values.astype(np.float32)) if self.has_conf
+             else torch.ones_like(y))
+        return x, y, w

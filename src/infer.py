@@ -86,10 +86,9 @@ def predict(models: list, loader: DataLoader, device: str) -> tuple[np.ndarray, 
     for i, (x, sid) in enumerate(loader):
         x = x.to(device, non_blocking=True)
         with torch.autocast("cuda", dtype=torch.float16, enabled=(device == "cuda")):
-            # Fold ensemble: average probabilities, not logits -- the folds are
-            # separately calibrated and averaging logits lets a confident fold
-            # dominate.
-            p = torch.stack([torch.sigmoid(m(x).float()) for m in models]).mean(0)
+            # Keep each fold separate; they are combined by rank after every study
+            # has been scored, which cannot be done batch by batch.
+            p = torch.stack([torch.sigmoid(m(x).float()) for m in models])
         preds.append(p.cpu().numpy())
         ids.extend(sid)
         if (i + 1) % 25 == 0 or i + 1 == len(loader):
@@ -121,7 +120,9 @@ def main() -> None:
                      size=cfg.get("size", 256))
     loader = DataLoader(ds, batch_size=args.batch, num_workers=args.workers)
 
-    preds, ids = predict(models, loader, device)
+    per_model, ids = predict(models, loader, device)
+    preds = rank_average(per_model)
+    print(f"rank-averaged {per_model.shape[0]} fold(s) over {per_model.shape[1]} studies")
 
     sub = pd.DataFrame(preds, columns=LABELS)
     sub.insert(0, ID_COL, ids)

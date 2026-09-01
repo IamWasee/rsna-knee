@@ -112,10 +112,30 @@ def normalise_label_table(path: Path) -> pd.DataFrame:
             f"{path.name} is missing {len(missing)} of the 12 targets: {missing}\n"
             f"columns present: {list(df.columns)}"
         )
-    df = df.rename(columns=rename)[[ID_COL] + LABELS]
+    df = df.rename(columns=rename)
 
-    for c in LABELS:
+    # Keep per-label confidence if the table carries it. "No mention of synovitis"
+    # and "moderate synovitis is present" both become a number, and only one of them
+    # deserves full weight in the loss; the confidence is what separates them.
+    conf = {}
+    for t in LABELS:
+        for cand in (f"{t}__conf", f"{t}_conf", f"{t} conf"):
+            hit = lookup.get(cand.lower())
+            if hit is not None:
+                conf[hit] = f"{t}__conf"
+                break
+    if conf:
+        df = df.rename(columns=conf)
+        print(f"  {len(conf)}/12 confidence columns found -- used as sample weights")
+        df = df[[ID_COL] + LABELS + [c for c in conf.values() if c in df.columns]]
+    else:
+        df = df[[ID_COL] + LABELS]
+
+    for c in [c for c in df.columns if c != ID_COL]:
         df[c] = pd.to_numeric(df[c], errors="coerce")
+    for c in df.columns:
+        if c.endswith("__conf"):
+            df[c] = df[c].fillna(1.0).clip(0.0, 1.0)
     n_nan = int(df[LABELS].isna().sum().sum())
     if n_nan:
         # A NaN target makes the loss NaN and the run trains to nothing while
@@ -220,7 +240,8 @@ def build_labels(args) -> tuple[pd.DataFrame, pd.DataFrame]:
 def evaluate(model, loader, device) -> tuple[np.ndarray, np.ndarray]:
     model.eval()
     P, Y = [], []
-    for x, y in loader:
+    for batch in loader:
+        x, y = batch[0], batch[1]
         with torch.autocast("cuda", dtype=torch.float16, enabled=device == "cuda"):
             logits = model(x.to(device, non_blocking=True))
         P.append(torch.sigmoid(logits.float()).cpu().numpy())
@@ -262,10 +283,14 @@ def train_fold(args, tr: pd.DataFrame, va: pd.DataFrame, gold: pd.DataFrame,
     for epoch in range(args.epochs):
         model.train()
         t0, total = time.time(), 0.0
-        for i, (x, y) in enumerate(tr_dl):
-            x, y = x.to(device, non_blocking=True), y.to(device, non_blocking=True)
+        for i, (x, y, w) in enumerate(tr_dl):
+            x = x.to(device, non_blocking=True)
+            y = y.to(device, non_blocking=True)
+            w = w.to(device, non_blocking=True)
             with torch.autocast("cuda", dtype=torch.float16, enabled=(device == "cuda")):
-                loss = criterion(model(x), y)
+                # Per-sample, per-label weights: a finding the report states plainly
+                # counts more than one it never mentioned.
+                loss = (criterion(model(x), y) * w).sum() / w.sum().clamp(min=1e-6)
             opt.zero_grad(set_to_none=True)
             scaler.scale(loss).backward()
             scaler.step(opt)

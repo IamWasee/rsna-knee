@@ -211,5 +211,9 @@ class KneeModel(nn.Module):
 
 def build_loss(pos_weight: torch.Tensor | None = None) -> nn.Module:
     """BCE over 12 independent binary targets -- multi-label, so no softmax: a knee can
-    have an ACL tear, an effusion and a Baker's cyst at once."""
-    return nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+    have an ACL tear, an effusion and a Baker's cyst at once.
+
+    reduction="none" so the caller can weight each element by how confidently the
+    report stated that finding, then reduce itself.
+    """
+    return nn.BCEWithLogitsLoss(pos_weight=pos_weight, reduction="none")
