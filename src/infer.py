@@ -114,10 +114,26 @@ def main() -> None:
     models, cfg, train_manifest = load_models(args.weights, device)
     check_parity(train_manifest, args.cache)
 
+    # Shape comes from the cache manifest first -- that records what the pixels
+    # actually are -- then the checkpoint args, and it is an error if neither has it.
+    # A silent .get(key, default) here is what served a model trained on 3 series a
+    # tensor built for 4: the default was returned, _load padded the difference, and
+    # the run scored 0.675 with nothing in the log to say why.
+    def _shape(key, alt=None):
+        for src in (train_manifest, cfg):
+            for k in (key, alt):
+                if k and k in src:
+                    return src[k]
+        raise SystemExit(
+            f"checkpoint and cache manifest both lack '{key}'. This checkpoint "
+            "predates shape recording and cannot be served safely -- retrain, or "
+            "pass the original preprocessing settings explicitly."
+        )
+
     ds = KneeStudies(test, cache=args.cache, train=False,
-                     slots=cfg.get("slots", 4),
-                     n_slices=cfg.get("n_slices", 9),
-                     size=cfg.get("size", 256))
+                     slots=_shape("slots", "n_series"),
+                     n_slices=_shape("n_slices"),
+                     size=_shape("size"))
     loader = DataLoader(ds, batch_size=args.batch, num_workers=args.workers)
 
     per_model, ids = predict(models, loader, device)

@@ -63,10 +63,11 @@ def main() -> None:
     gold = train[train[LABELS].notna().all(axis=1)].reset_index(drop=True)
 
     ckpts = sorted(args.weights.glob("*.pt")) if args.weights.is_dir() else [args.weights]
-    models, cfg = [], {}
+    models, cfg, train_manifest = [], {}, {}
     for c in ckpts:
         ck = torch.load(c, map_location=device, weights_only=False)
         cfg = ck["args"]
+        train_manifest = ck.get("cache_manifest", train_manifest)
         m = KneeModel(cfg["backbone"], LABELS, pretrained=False,
                       head=cfg.get("head", "shared"), pool=cfg.get("pool", "gap"),
                       n_slot=cfg.get("slots", 4),
@@ -77,9 +78,26 @@ def main() -> None:
         models.append(m)
     print(f"loaded {len(models)} checkpoint(s), backbone {cfg['backbone']}\n")
 
+    # Shape comes from the cache manifest first -- that records what the pixels
+    # actually are -- then the checkpoint args, and it is an error if neither has it.
+    # A silent .get(key, default) here is what served a model trained on 3 series a
+    # tensor built for 4: the default was returned, _load padded the difference, and
+    # the run scored 0.675 with nothing in the log to say why.
+    def _shape(key, alt=None):
+        for src in (train_manifest, cfg):
+            for k in (key, alt):
+                if k and k in src:
+                    return src[k]
+        raise SystemExit(
+            f"checkpoint and cache manifest both lack '{key}'. This checkpoint "
+            "predates shape recording and cannot be served safely -- retrain, or "
+            "pass the original preprocessing settings explicitly."
+        )
+
     ds = KneeStudies(gold, cache=args.cache, train=False,
-                     slots=cfg.get("slots", 4), n_slices=cfg.get("n_slices", 9),
-                     size=cfg.get("size", 256))
+                     slots=_shape("slots", "n_series"),
+                     n_slices=_shape("n_slices"),
+                     size=_shape("size"))
 
     # Predict on all 58 so "worst" is meaningful.
     preds, attns = [], []
