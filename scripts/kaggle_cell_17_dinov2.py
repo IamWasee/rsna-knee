@@ -7,9 +7,14 @@
 #   3. Dataset -> stevenleehans/rsna-knee-llm-report-labels
 #   4. Model   -> metaresearch/dinov2/PyTorch/small/1
 #
-# One fold only. A ViT is slower per step than a ResNet, and one fold answers the
-# question -- the previous run's folds spanned 0.754-0.783, so a backbone worth
-# adopting should clear that band on its own.
+# Full five folds. The single-fold test scored 0.789 against ResNet-34's 0.773 on
+# the same fold, with Fracture 0.63 -> 0.76 and Contusion 0.70 -> 0.80 -- the two
+# smallest focal findings, which is where a stronger encoder should show first.
+#
+# This run uses the corrected validation: checkpoints are selected on each fold's
+# own held-out studies rather than on the shared 58, and folds are grouped by report
+# text. Its number is therefore NOT comparable to 0.789 or 0.770; it is comparable
+# to the leaderboard.
 #
 # GPU on, Internet on.
 # ============================================================
@@ -50,9 +55,11 @@ print(f"backbone: {DINO}")
 # behaviour, and the learning rates follow the public baseline's split: the head is
 # new and trains fast, the encoder is only being adapted and trains 125x slower.
 !python $CODE/src/train.py --cache "$CACHE" --labels "$LABELS" \
-    --backbone "$DINO" --only-fold 0 --epochs 12 --batch 8 \
+    --backbone "$DINO" --epochs 12 --batch 8 \
     --lr 1e-3 --lr-backbone 8e-6 --unfreeze-last 6 --weight-decay 0.02 \
     --head shared --pool gap \
     --out /kaggle/working/weights_dino
 
-print("\nCompare fold 0 against the ResNet-34 run: 0.773 on the same fold.")
+import glob as _g
+print("\ncheckpoints:", sorted(_g.glob("/kaggle/working/weights_dino/*.pt")))
+print("oof:", sorted(_g.glob("/kaggle/working/weights_dino/oof.csv")))
