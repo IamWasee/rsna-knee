@@ -130,11 +130,12 @@ def crop_resize(arr: np.ndarray, spacing: float, size: int, crop_mm: float) -> n
     return (cv2.resize(img, (size, size), interpolation=cv2.INTER_AREA) * 255).astype(np.uint8)
 
 
-def load_slot(series_dir: Path, size: int, crop_mm: float) -> np.ndarray:
-    """N_ANCHORS anchors across the joint, GROUP adjacent slices at each."""
+def load_slot(series_dir: Path, size: int, crop_mm: float,
+              n_anchors: int = N_ANCHORS) -> np.ndarray:
+    """n_anchors anchors across the joint, GROUP adjacent slices at each."""
     import pydicom
 
-    n_out = N_ANCHORS * GROUP
+    n_out = n_anchors * GROUP
     out = np.zeros((n_out, size, size), dtype=np.uint8)
 
     files = list(series_dir.glob("*.dcm"))
@@ -147,7 +148,7 @@ def load_slot(series_dir: Path, size: int, crop_mm: float) -> np.ndarray:
     # stays wide rather than hugging the middle.
     lo, hi = int(len(files) * 0.15), int(np.ceil(len(files) * 0.85))
     core = files[lo:hi] or files
-    anchors = np.linspace(GROUP // 2, len(core) - 1 - GROUP // 2, N_ANCHORS)
+    anchors = np.linspace(GROUP // 2, len(core) - 1 - GROUP // 2, n_anchors)
     anchors = np.clip(anchors.round().astype(int), 0, max(0, len(core) - 1))
 
     k = 0
@@ -164,16 +165,16 @@ def load_slot(series_dir: Path, size: int, crop_mm: float) -> np.ndarray:
 
 
 def process_study(args: tuple) -> tuple[str, bool, str]:
-    study_id, series_ids, root, split, out_dir, size, crop_mm, n_slots = args
+    study_id, series_ids, root, split, out_dir, size, crop_mm, n_slots, n_anchors = args
     dest = Path(out_dir) / f"{study_id}.npy"
     if dest.exists():
         return study_id, True, "cached"
     try:
-        n_out = N_ANCHORS * GROUP
+        n_out = n_anchors * GROUP
         vol = np.zeros((n_slots, n_out, size, size), dtype=np.uint8)
         for i, sid in enumerate(series_ids[:n_slots]):
             vol[i] = load_slot(Path(root) / f"{split}_series" / study_id / sid,
-                               size, crop_mm)
+                               size, crop_mm, n_anchors)
         np.save(dest, vol)
         return study_id, True, ""
     except Exception:
@@ -187,6 +188,10 @@ def main() -> None:
     ap.add_argument("--slots", type=int, default=4)
     ap.add_argument("--size", type=int, default=256)
     ap.add_argument("--crop-mm", type=float, default=CROP_MM)
+    ap.add_argument("--anchors", type=int, default=N_ANCHORS,
+                    help="anchor groups per slot; slices per slot is anchors x 3. "
+                         "One group at 336px matches the public solutions and costs "
+                         "less storage than three at 256px.")
     ap.add_argument("--workers", type=int, default=4)
     ap.add_argument("--limit", type=int, help="process only N studies (smoke test)")
     args = ap.parse_args()
@@ -198,14 +203,16 @@ def main() -> None:
     groups = series.groupby(ID_COL)
     studies = list(groups.groups)[: args.limit]
 
-    n_out = N_ANCHORS * GROUP
+    n_out = args.anchors * GROUP
     mb = args.slots * n_out * args.size ** 2 / 1e6
     print(f"{len(studies)} studies -> {args.out}")
-    print(f"{args.slots} slots x {n_out} slices x {args.size}px, {args.crop_mm:.0f}mm crop")
+    print(f"{args.slots} slots x {n_out} slices ({args.anchors} anchors x {GROUP}) "
+          f"x {args.size}px, {args.crop_mm:.0f}mm crop")
     print(f"{mb:.1f} MB each, ~{mb * len(studies) / 1024:.1f} GB total")
 
     jobs = [(s, pick_series(groups.get_group(s), args.slots), str(root), args.split,
-             str(args.out), args.size, args.crop_mm, args.slots) for s in studies]
+             str(args.out), args.size, args.crop_mm, args.slots, args.anchors)
+            for s in studies]
 
     done = failed = 0
     with ProcessPoolExecutor(args.workers) as pool:
@@ -225,8 +232,8 @@ def main() -> None:
     # silently served corner crops and blank slices to a model expecting neither.
     import json
     manifest = {"slots": args.slots, "size": args.size, "crop_mm": args.crop_mm,
-                "n_anchors": N_ANCHORS, "group": GROUP,
-                "n_slices": N_ANCHORS * GROUP, "band": [0.15, 0.85],
+                "n_anchors": args.anchors, "group": GROUP,
+                "n_slices": args.anchors * GROUP, "band": [0.15, 0.85],
                 "slot_scheme": [list(x) for x in SLOTS[:args.slots]], "split": args.split}
     (args.out / "cache_manifest.json").write_text(json.dumps(manifest, indent=2))
     print("manifest:", json.dumps(manifest))
