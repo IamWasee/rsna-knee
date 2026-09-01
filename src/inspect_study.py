@@ -70,7 +70,8 @@ def main() -> None:
         m = KneeModel(cfg["backbone"], LABELS, pretrained=False,
                       head=cfg.get("head", "shared"), pool=cfg.get("pool", "gap"),
                       n_slot=cfg.get("slots", 4),
-                      groups_per_slot=cfg.get("n_slices", 9) // 3).to(device)
+                      groups_per_slot=cfg.get("n_slices", 9) // 3,
+                      unfreeze_last=cfg.get("unfreeze_last", 6)).to(device)
         m.load_state_dict(ck["model"])
         m.eval()
         models.append(m)

@@ -31,6 +31,51 @@ SLOT_PRIOR = {
 PRIOR_STRENGTH = 0.55      # exp(0.55) ~ 1.73x preference; biases, never excludes
 
 
+class ViTBackbone(nn.Module):
+    """A DINOv2 encoder loaded from an attached Kaggle model directory.
+
+    Wrapped rather than used directly so the rest of the model does not have to know
+    whether it is holding a CNN or a transformer: this returns (B, C, h, w) by folding
+    the patch tokens back onto their grid, which is what FocalPool expects.
+
+    Only the last few blocks are opened for training. The early blocks of a
+    self-supervised transformer are generic edge and texture filters and there is not
+    enough supervision here to improve them -- there is certainly enough to damage
+    them.
+    """
+
+    def __init__(self, path: str, unfreeze_last: int = 6):
+        super().__init__()
+        from transformers import AutoModel
+
+        self.net = AutoModel.from_pretrained(path)
+        n = len(self.net.encoder.layer)
+        for prm in self.net.parameters():
+            prm.requires_grad = False
+        for blk in self.net.encoder.layer[max(0, n - unfreeze_last):]:
+            for prm in blk.parameters():
+                prm.requires_grad = True
+        for prm in self.net.layernorm.parameters():
+            prm.requires_grad = True
+        self.num_features = self.net.config.hidden_size
+        self.patch = self.net.config.patch_size
+        trainable = sum(p.numel() for p in self.net.parameters() if p.requires_grad)
+        print(f"backbone: {n} blocks, last {unfreeze_last} trainable "
+              f"({trainable / 1e6:.1f}M params), dim {self.num_features}")
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        out = self.net(pixel_values=x).last_hidden_state      # (N, 1+P, D)
+        cls, tok = out[:, :1], out[:, 1:]
+        n, p, d = tok.shape
+        g = int(p ** 0.5)
+        if g * g != p:                                        # not a square grid
+            return tok.transpose(1, 2).unsqueeze(-1)
+        fmap = tok.transpose(1, 2).reshape(n, d, g, g)
+        # Carry the CLS token as an extra "position" so pooling can still see it.
+        self._cls = cls.squeeze(1)
+        return fmap
+
+
 class FocalPool(nn.Module):
     """Mean plus the upper tail of each channel over the spatial grid.
 
@@ -100,19 +145,24 @@ class KneeModel(nn.Module):
     def __init__(self, backbone: str = "resnet34", labels: list[str] | None = None,
                  pretrained: bool = True, dropout: float = 0.3,
                  head: str = "slot", pool: str = "focal", n_slot: int = 4,
-                 groups_per_slot: int = 3):
+                 groups_per_slot: int = 3, unfreeze_last: int = 6):
         super().__init__()
-        import timm
-
         from config import LABELS
         labels = labels or LABELS
         self.n_slot, self.groups = n_slot, groups_per_slot
         self.head_kind, self.pool_kind = head, pool
+        self.is_vit = backbone.startswith("dinov2:")
 
-        # features_only gives the spatial map that focal pooling needs; num_classes=0
-        # would have already collapsed it with the global average we are avoiding.
-        self.encoder = timm.create_model(backbone, pretrained=pretrained,
-                                         num_classes=0, global_pool="", in_chans=3)
+        if self.is_vit:
+            # "dinov2:/kaggle/input/models/metaresearch/dinov2/pytorch/small/1"
+            self.encoder = ViTBackbone(backbone.split(":", 1)[1], unfreeze_last)
+        else:
+            import timm
+            # global_pool="" keeps the spatial map that focal pooling needs;
+            # num_classes=0 alone would already have collapsed it with the average
+            # we are trying to avoid.
+            self.encoder = timm.create_model(backbone, pretrained=pretrained,
+                                             num_classes=0, global_pool="", in_chans=3)
         dim = self.encoder.num_features
         self.focal = FocalPool() if pool == "focal" else None
         feat = dim * (2 if pool == "focal" else 1)
@@ -143,6 +193,20 @@ class KneeModel(nn.Module):
             pooled, attn = self.pool(feats)
             logits = self.head(pooled)
         return (logits, attn) if return_attention else logits
+
+
+    def param_groups(self, lr_head: float, lr_backbone: float) -> list[dict]:
+        """Two learning rates: the head is new, the encoder is only being adapted.
+
+        A pretrained encoder driven at the head's rate forgets what it learned before
+        it learns the task. The public baseline for this competition uses a 125x gap
+        (1e-3 head, 8e-6 encoder); this keeps the same ratio.
+        """
+        enc = [p for p in self.encoder.parameters() if p.requires_grad]
+        enc_ids = {id(p) for p in enc}
+        rest = [p for p in self.parameters() if p.requires_grad and id(p) not in enc_ids]
+        return [{"params": rest, "lr": lr_head},
+                {"params": enc, "lr": lr_backbone}]
 
 
 def build_loss(pos_weight: torch.Tensor | None = None) -> nn.Module:

@@ -195,10 +195,18 @@ def train_fold(args, tr: pd.DataFrame, va: pd.DataFrame, gold: pd.DataFrame,
 
     model = KneeModel(args.backbone, LABELS, pretrained=args.pretrained,
                       head=args.head, pool=args.pool, n_slot=args.slots,
-                      groups_per_slot=args.n_slices // 3).to(device)
-    opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-2)
+                      groups_per_slot=args.n_slices // 3,
+                      unfreeze_last=args.unfreeze_last).to(device)
+
+    # A pretrained encoder driven at the head's rate forgets what it knew before it
+    # learns the task, so the two get separate rates. For a CNN trained from an
+    # ImageNet init the gap matters less, but keeping one code path avoids a second
+    # definition that has to be kept in step by hand.
+    opt = torch.optim.AdamW(model.param_groups(args.lr, args.lr_backbone),
+                            weight_decay=args.weight_decay)
     sched = torch.optim.lr_scheduler.OneCycleLR(
-        opt, max_lr=args.lr, total_steps=args.epochs * len(tr_dl), pct_start=0.1)
+        opt, max_lr=[g["lr"] for g in opt.param_groups],
+        total_steps=args.epochs * len(tr_dl), pct_start=0.1)
     scaler = torch.amp.GradScaler(enabled=(device == "cuda"))
     criterion = build_loss()
 
@@ -249,7 +257,13 @@ def main() -> None:
     ap.add_argument("--only-fold", type=int, help="train a single fold (9h runtime limits)")
     ap.add_argument("--epochs", type=int, default=6)
     ap.add_argument("--batch", type=int, default=4)
-    ap.add_argument("--lr", type=float, default=3e-4)
+    ap.add_argument("--lr", type=float, default=3e-4, help="head learning rate")
+    ap.add_argument("--lr-backbone", type=float, default=3e-4,
+                    help="encoder learning rate; for a pretrained ViT the public "
+                         "baseline uses 8e-6 against a 1e-3 head, a 125x gap")
+    ap.add_argument("--weight-decay", type=float, default=1e-2)
+    ap.add_argument("--unfreeze-last", type=int, default=6,
+                    help="trainable transformer blocks from the output end (ViT only)")
     ap.add_argument("--workers", type=int, default=2)
     ap.add_argument("--slots", type=int, default=4)
     ap.add_argument("--n-slices", type=int, default=9)
