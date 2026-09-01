@@ -80,15 +80,48 @@ def check_parity(train_manifest: dict, cache: Path) -> None:
     print(f"  preprocessing parity verified ({len(fields)} fields match)")
 
 
+def tta_views(x: torch.Tensor, n: int) -> list[torch.Tensor]:
+    """The identity plus small rigid jitters.
+
+    No flips, for the same reason training has none: horizontal mirrors medial into
+    lateral, corrupting four of the twelve targets, and vertical moves the knee off
+    the orientation it is always acquired in. What is left are transforms the label
+    genuinely does not depend on.
+    """
+    import torch.nn.functional as F
+
+    views = [x]
+    for k in range(1, n):
+        ang = (-1) ** k * (3.0 + 2.0 * (k // 2)) * np.pi / 180
+        sc = 1.0 + 0.03 * (k % 2)
+        b = x.shape[0] * x.shape[1]
+        flat = x.flatten(0, 1)
+        cos, sin = float(np.cos(ang)) / sc, float(np.sin(ang)) / sc
+        theta = torch.tensor([[cos, -sin, 0.0], [sin, cos, 0.0]],
+                             device=x.device, dtype=torch.float32)
+        theta = theta.unsqueeze(0).expand(b, -1, -1)
+        grid = F.affine_grid(theta, flat.shape, align_corners=False)
+        warped = F.grid_sample(flat, grid, mode="bilinear",
+                               padding_mode="border", align_corners=False)
+        views.append(warped.view_as(x))
+    return views
+
+
 @torch.no_grad()
-def predict(models: list, loader: DataLoader, device: str) -> tuple[np.ndarray, list]:
+def predict(models: list, loader: DataLoader, device: str,
+            tta: int = 1) -> tuple[np.ndarray, list]:
     preds, ids = [], []
     for i, (x, sid) in enumerate(loader):
         x = x.to(device, non_blocking=True)
         with torch.autocast("cuda", dtype=torch.float16, enabled=(device == "cuda")):
             # Keep each fold separate; they are combined by rank after every study
-            # has been scored, which cannot be done batch by batch.
-            p = torch.stack([torch.sigmoid(m(x).float()) for m in models])
+            # has been scored, which cannot be done batch by batch. TTA views are
+            # averaged within a fold, since they are the same model on the same
+            # study and their scales are directly comparable.
+            p = torch.stack([
+                torch.stack([torch.sigmoid(m(v).float())
+                             for v in tta_views(x, tta)]).mean(0)
+                for m in models])
         preds.append(p.cpu().numpy())
         ids.extend(sid)
         if (i + 1) % 25 == 0 or i + 1 == len(loader):
@@ -103,6 +136,10 @@ def main() -> None:
     ap.add_argument("--out", type=Path, default=Path("submission.csv"))
     ap.add_argument("--batch", type=int, default=8)
     ap.add_argument("--workers", type=int, default=2)
+    ap.add_argument("--tta", type=int, default=1,
+                    help="views per model: 1 disables TTA, 3-5 is typical. Validate "
+                         "out of fold before trusting it -- averaging jittered views "
+                         "can as easily blur a correct ranking as sharpen it.")
     args = ap.parse_args()
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -136,7 +173,7 @@ def main() -> None:
                      size=_shape("size"))
     loader = DataLoader(ds, batch_size=args.batch, num_workers=args.workers)
 
-    per_model, ids = predict(models, loader, device)
+    per_model, ids = predict(models, loader, device, tta=args.tta)
     preds = rank_average(per_model)
     print(f"rank-averaged {per_model.shape[0]} fold(s) over {per_model.shape[1]} studies")
 

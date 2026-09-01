@@ -191,17 +191,31 @@ def build_labels(args) -> tuple[pd.DataFrame, pd.DataFrame]:
     derived = normalise_label_table(Path(args.labels))
     derived = derived[~derived[ID_COL].isin(gold[ID_COL])]
 
-    # Group duplicate report texts. train.csv has 4,407 studies but fewer unique
-    # reports; identical text is the same patient or a repeated study, and plain
-    # KFold would put the pair either side of the split. There is no patient id in
-    # this dataset, so the report is the only grouping key available.
+    # Fold grouping. Two sources of leakage, and the scanner is the larger one:
+    # random splits let a model memorise the site rather than the knee, which one
+    # competitor measured as an inflated 0.053 macro AUC and a 0.136 gap at pixel
+    # level. Duplicate report texts are the smaller one -- identical text is the
+    # same patient or a repeated study. Group on the scanner where preprocessing
+    # recorded it, and fall back to the report text where it did not.
+    meta_path = Path(args.cache) / "study_meta.csv"
     text = train.set_index(ID_COL)["Report"].astype(str)
-    derived["_group"] = derived[ID_COL].map(
-        lambda i: hash(text.get(i, i)) if i in text.index else hash(i))
+    if meta_path.exists():
+        meta = pd.read_csv(meta_path).set_index(ID_COL)
+        scanner = meta["scanner"].astype(str)
+        derived["_group"] = derived[ID_COL].map(
+            lambda i: scanner.get(i) if i in scanner.index and scanner.get(i).strip()
+            else str(hash(text.get(i, i))))
+        n_sc = derived[ID_COL].isin(scanner.index).sum()
+        print(f"  folds grouped by scanner: {derived['_group'].nunique()} groups "
+              f"over {n_sc}/{len(derived)} studies with a fingerprint")
+    else:
+        derived["_group"] = derived[ID_COL].map(
+            lambda i: hash(text.get(i, i)) if i in text.index else hash(i))
+        print("  no study_meta.csv in the cache -- folds grouped by report text only, "
+              "which does NOT prevent scanner memorisation")
     n_dup = len(derived) - derived["_group"].nunique()
     if n_dup:
-        print(f"  {n_dup} studies share a report with another study -- grouped so "
-              f"they cannot straddle a fold boundary")
+        print(f"  {n_dup} studies share a group and cannot straddle a fold boundary")
 
     overlap = derived[ID_COL].isin(train[ID_COL]).mean()
     if overlap < 0.9:

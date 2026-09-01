@@ -49,6 +49,7 @@ SLOTS = [
 N_ANCHORS = 3      # anchor positions across the joint
 GROUP = 3          # physically adjacent slices per anchor -> N_ANCHORS*GROUP total
 CROP_MM = 140.0    # physical field kept before resizing
+LAT_MIN_OFFSET_MM = 20.0   # inside this the side is not readable from geometry
 
 
 def pick_series(series: pd.DataFrame, n_slots: int) -> list[str]:
@@ -94,6 +95,59 @@ def sort_by_position(files: list[Path], pydicom) -> list[Path]:
     return [t[2] for t in keyed]
 
 
+def image_centre_x(ds) -> float | None:
+    """x of the image centre in patient coordinates.
+
+    ImagePositionPatient is the centre of the FIRST voxel, i.e. a corner. Using it
+    directly reads the edge of the field of view, which for a knee near the midline
+    can sit on the wrong side of zero. Stepping to the middle of the image first
+    gives the side the anatomy is actually on. DICOM +x is the patient's left.
+    """
+    iop = getattr(ds, "ImageOrientationPatient", None)
+    ipp = getattr(ds, "ImagePositionPatient", None)
+    if iop is None or ipp is None or len(iop) != 6:
+        return None
+    try:
+        row = np.array(iop[:3], float)
+        col = np.array(iop[3:], float)
+        pos = np.array(ipp, float)
+        ps = getattr(ds, "PixelSpacing", [1.0, 1.0])
+        centre = pos + row * (float(ds.Columns) / 2) * float(ps[1]) \
+                     + col * (float(ds.Rows) / 2) * float(ps[0])
+        return float(centre[0])
+    except Exception:
+        return None
+
+
+def series_side(ds) -> str | None:
+    """'L' or 'R' for this series, from the tag when present, else from geometry.
+
+    The Laterality tag is populated on only about half of these studies, so geometry
+    is the fallback rather than the exception.
+    """
+    tag = str(getattr(ds, "Laterality", "") or "").strip().upper()
+    if tag in ("L", "R"):
+        return tag
+    x = image_centre_x(ds)
+    if x is None or abs(x) < LAT_MIN_OFFSET_MM:
+        return None            # too near the midline to call
+    return "L" if x > 0 else "R"
+
+
+def scanner_fingerprint(ds) -> str:
+    """Identify the scanner, for grouping folds by site.
+
+    Random K-fold over studies lets a model memorise the scanner instead of the
+    knee: a competitor measured a 0.053 macro AUC drop moving to scanner-grouped
+    folds, and a 0.136 gap at pixel level. Grouping on this makes the held-out score
+    mean what it claims to.
+    """
+    parts = [str(getattr(ds, t, "") or "") for t in
+             ("Manufacturer", "ManufacturerModelName", "SoftwareVersions",
+              "ImagingFrequency", "ReceiveCoilName")]
+    return "|".join(p.strip() for p in parts)
+
+
 def pixel_spacing(ds) -> float:
     ps = getattr(ds, "PixelSpacing", None)
     if ps is not None and len(ps) >= 1:
@@ -131,8 +185,21 @@ def crop_resize(arr: np.ndarray, spacing: float, size: int, crop_mm: float) -> n
 
 
 def load_slot(series_dir: Path, size: int, crop_mm: float,
-              n_anchors: int = N_ANCHORS) -> np.ndarray:
-    """n_anchors anchors across the joint, GROUP adjacent slices at each."""
+              n_anchors: int = N_ANCHORS, plane: str = "",
+              normalise_side: bool = True) -> tuple[np.ndarray, str | None, str]:
+    """n_anchors anchors across the joint, GROUP adjacent slices at each.
+
+    Returns the volume, the detected side, and the scanner fingerprint.
+
+    Laterality is normalised so every study is presented as a left knee. Which
+    operation achieves that depends on the plane, and getting this wrong is worse
+    than not doing it:
+
+      coronal, axial   -- medial/lateral runs across the IMAGE, so mirror the pixels
+      sagittal         -- medial/lateral is the STACK axis, so reverse the slice
+                          order; mirroring the pixels would flip anterior/posterior
+                          instead and put the patella at the back of the knee
+    """
     import pydicom
 
     n_out = n_anchors * GROUP
@@ -140,8 +207,19 @@ def load_slot(series_dir: Path, size: int, crop_mm: float,
 
     files = list(series_dir.glob("*.dcm"))
     if not files:
-        return out
+        return out, None, ""
     files = sort_by_position(files, pydicom)
+
+    side, fp = None, ""
+    try:
+        head = pydicom.dcmread(str(files[0]), stop_before_pixels=True)
+        side, fp = series_side(head), scanner_fingerprint(head)
+    except Exception:
+        pass
+
+    flip_lr = normalise_side and side == "R" and plane in ("Coronal", "Axial")
+    if normalise_side and side == "R" and plane == "Sagittal":
+        files = files[::-1]
 
     # Anchors spread across the central 70%: the outer slices of a knee series are
     # mostly soft tissue and air, but the menisci sit peripherally, so the window
@@ -164,26 +242,38 @@ def load_slot(series_dir: Path, size: int, crop_mm: float,
             i = int(np.clip(a + d, 0, len(core) - 1))
             try:
                 ds = pydicom.dcmread(str(core[i]))
-                out[k] = crop_resize(ds.pixel_array, pixel_spacing(ds), size, crop_mm)
+                img = crop_resize(ds.pixel_array, pixel_spacing(ds), size, crop_mm)
+                out[k] = img[:, ::-1] if flip_lr else img
             except Exception:
                 pass
             k += 1
-    return out
+    return out, side, fp
 
 
 def process_study(args: tuple) -> tuple[str, bool, str]:
-    study_id, series_ids, root, split, out_dir, size, crop_mm, n_slots, n_anchors = args
+    (study_id, series_ids, root, split, out_dir, size, crop_mm, n_slots, n_anchors,
+     planes, normalise_side) = args
     dest = Path(out_dir) / f"{study_id}.npy"
     if dest.exists():
         return study_id, True, "cached"
     try:
         n_out = n_anchors * GROUP
         vol = np.zeros((n_slots, n_out, size, size), dtype=np.uint8)
+        sides, fps = [], []
         for i, sid in enumerate(series_ids[:n_slots]):
-            vol[i] = load_slot(Path(root) / f"{split}_series" / study_id / sid,
-                               size, crop_mm, n_anchors)
+            v, side, fp = load_slot(Path(root) / f"{split}_series" / study_id / sid,
+                                    size, crop_mm, n_anchors,
+                                    plane=planes.get(sid, ""),
+                                    normalise_side=normalise_side)
+            vol[i] = v
+            if side:
+                sides.append(side)
+            if fp:
+                fps.append(fp)
         np.save(dest, vol)
-        return study_id, True, ""
+        # Majority side across the study's series; a study is one knee.
+        side = max(set(sides), key=sides.count) if sides else ""
+        return study_id, True, f"{side}\t{fps[0] if fps else ''}"
     except Exception:
         return study_id, False, traceback.format_exc(limit=2)
 
@@ -200,6 +290,8 @@ def main() -> None:
                          "One group at 336px matches the public solutions and costs "
                          "less storage than three at 256px.")
     ap.add_argument("--workers", type=int, default=4)
+    ap.add_argument("--no-laterality", action="store_true",
+                    help="skip presenting every knee as a left one")
     ap.add_argument("--limit", type=int, help="process only N studies (smoke test)")
     args = ap.parse_args()
 
@@ -217,11 +309,17 @@ def main() -> None:
           f"x {args.size}px, {args.crop_mm:.0f}mm crop")
     print(f"{mb:.1f} MB each, ~{mb * len(studies) / 1024:.1f} GB total")
 
+    # Plane per series id, so load_slot knows whether a right knee needs its pixels
+    # mirrored (coronal/axial) or its slice order reversed (sagittal).
+    planes = dict(zip(series[SERIES_COL], series["Anatomical_Plane"]))
+
     jobs = [(s, pick_series(groups.get_group(s), args.slots), str(root), args.split,
-             str(args.out), args.size, args.crop_mm, args.slots, args.anchors)
+             str(args.out), args.size, args.crop_mm, args.slots, args.anchors,
+             planes, not args.no_laterality)
             for s in studies]
 
     done = failed = 0
+    meta = {}
     with ProcessPoolExecutor(args.workers) as pool:
         futures = [pool.submit(process_study, j) for j in jobs]
         for f in as_completed(futures):
@@ -231,8 +329,27 @@ def main() -> None:
                 failed += 1
                 if failed <= 3:
                     print(f"\nFAILED {sid}:\n{msg}")
+            elif msg and msg != "cached" and "\t" in msg:
+                side, fp = msg.split("\t", 1)
+                meta[sid] = (side, fp)
             if done % 200 == 0:
                 print(f"  {done}/{len(jobs)}  ({failed} failed)", flush=True)
+
+    # Side and scanner per study. The scanner is what folds must be grouped on:
+    # random splits let a model memorise the site instead of the knee, worth an
+    # inflated 0.053 macro AUC by one competitor's measurement.
+    if meta:
+        out_csv = args.out / "study_meta.csv"
+        with out_csv.open("w") as fh:
+            fh.write("StudyInstanceUID,side,scanner\n")
+            for sid, (side, fp) in sorted(meta.items()):
+                fh.write(f'{sid},{side},"{fp}"\n')
+        sides = [v[0] for v in meta.values() if v[0]]
+        scanners = {v[1] for v in meta.values() if v[1]}
+        print(f"laterality: {len(sides)}/{len(meta)} resolved "
+              f"({sides.count('R')} right normalised to left)")
+        print(f"scanners: {len(scanners)} distinct fingerprints")
+        print(f"wrote {out_csv}")
 
     # Record how this cache was built. The checkpoint stores a copy, and inference
     # compares the two: a cache built with different constants is the failure that
