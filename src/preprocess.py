@@ -148,7 +148,14 @@ def load_slot(series_dir: Path, size: int, crop_mm: float,
     # stays wide rather than hugging the middle.
     lo, hi = int(len(files) * 0.15), int(np.ceil(len(files) * 0.85))
     core = files[lo:hi] or files
-    anchors = np.linspace(GROUP // 2, len(core) - 1 - GROUP // 2, n_anchors)
+    lo_a, hi_a = GROUP // 2, len(core) - 1 - GROUP // 2
+    if n_anchors == 1:
+        # np.linspace(a, b, 1) returns [a], not the midpoint -- with one anchor that
+        # samples the far edge of the stack, which on a sagittal knee is soft tissue
+        # with no joint in it. One anchor means the centre.
+        anchors = np.array([(lo_a + hi_a) / 2])
+    else:
+        anchors = np.linspace(lo_a, hi_a, n_anchors)
     anchors = np.clip(anchors.round().astype(int), 0, max(0, len(core) - 1))
 
     k = 0

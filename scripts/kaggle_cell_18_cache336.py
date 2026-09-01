@@ -1,13 +1,17 @@
 # ============================================================
-# RSNA Knee — 336px cache, 3 slices per slot
+# RSNA Knee — 288px cache, resolution as the only change
 #
-# The public solutions use 336px with 3 slices per slot and a 130mm crop; ours is
-# 256px with 9. Two independent sources report that trading slices for resolution
-# wins here, and it is the shape a meniscal tear needs -- a few pixels wide at full
-# resolution, gone at 256.
+# Resolution 256 -> 288, everything else held: 3 anchor groups, 140mm crop, 4 slots.
+# This is the configuration a competitor measured at 0.7815 ("288px, 140mm crop,
+# center-9 of 24") and it isolates resolution as one variable.
 #
-# It is also SMALLER: 4 slots x 3 slices x 336px = 1.35 MB/study (~6 GB) against the
-# current 4 x 9 x 256 = 2.36 MB (~10 GB).
+# Not 336 with one anchor group, despite that being what the top public notebooks
+# use. One anchor takes the centre of the stack; on a sagittal knee the cruciates
+# are central but the MENISCI ARE PERIPHERAL, and menisci are four of the twelve
+# labels. Keeping three anchors preserves that coverage; 336px with three would be
+# 17.5 GB against a 19.5 GB working limit.
+#
+# 4 slots x 9 slices x 288px = 2.99 MB/study, ~12.9 GB.
 #
 # Attach the competition only. CPU. ~40 min.
 # ============================================================
@@ -18,13 +22,12 @@ CODE = "/kaggle/working/rsna-knee"
 !rm -rf $CODE && git clone -q https://github.com/IamWasee/rsna-knee.git $CODE
 sys.path.insert(0, f"{CODE}/src")
 
-CACHE = "/kaggle/working/cache_336"
+CACHE = "/kaggle/working/cache_288"
 
-# N_ANCHORS is a module constant, so one anchor group is requested by asking for
-# 3 slices; preprocess.py records what it actually did in cache_manifest.json and
-# inference now refuses to run against a cache built differently.
+# preprocess.py records what it actually did in cache_manifest.json; infer.py now
+# refuses to run against a cache built with different constants.
 !python $CODE/src/preprocess.py --out $CACHE --limit 20 --workers 4 \
-    --size 336 --crop-mm 130 --anchors 1
+    --size 288 --crop-mm 140 --anchors 3
 
 import json
 man = json.load(open(f"{CACHE}/cache_manifest.json"))
@@ -45,4 +48,4 @@ for s in range(v.shape[0]):
 plt.tight_layout(); plt.show()
 
 # Full run -- uncomment once the images look right.
-# !python $CODE/src/preprocess.py --out $CACHE --workers 4 --size 336 --crop-mm 130 --anchors 1
+# !python $CODE/src/preprocess.py --out $CACHE --workers 4 --size 288 --crop-mm 140 --anchors 3
