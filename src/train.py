@@ -259,6 +259,38 @@ def build_labels(args) -> tuple[pd.DataFrame, pd.DataFrame]:
     gold = train[train[LABELS].notna().all(axis=1)][[ID_COL] + LABELS].copy()
 
     derived = normalise_label_table(Path(args.labels))
+
+    # Take individual label columns from a second reader. Measured against the 58
+    # gold studies, no public table wins everywhere: llm_labels_v4_blend leads
+    # overall (0.893) but pilkwang's report_labels_v2 reads Fracture at 0.871
+    # against its 0.793 -- and Fracture is our weakest image label. Blending whole
+    # tables is measured to gain nothing; taking the one column where the gap is
+    # four times the noise floor is a different move.
+    #
+    # Safe to mix sources because sharpen() rank-maps every label independently,
+    # so a borrowed column is never compared against the primary table's scale.
+    for spec in args.borrow or []:
+        path, _, cols = spec.partition(":")
+        want = [c.strip() for c in cols.split(",") if c.strip()]
+        if not want:
+            raise SystemExit(f"--borrow needs 'file.csv:Label[,Label]', got {spec!r}")
+        other = normalise_label_table(Path(path)).set_index(ID_COL)
+        missing = [c for c in want if c not in other.columns]
+        if missing:
+            raise SystemExit(f"{Path(path).name} has no column(s) {missing}")
+        src = other.reindex(derived[ID_COL].astype(str))
+        for c in want:
+            v = pd.to_numeric(src[c], errors="coerce").values
+            have = ~np.isnan(v)
+            if have.mean() < 0.9:
+                raise SystemExit(
+                    f"{Path(path).name} covers only {have.mean():.0%} of the studies "
+                    f"for {c!r}; borrowing it would blank the rest.")
+            keep = derived[c].values
+            derived[c] = np.where(have, v, keep)
+            print(f"  borrowed {c!r} from {Path(path).name} "
+                  f"({have.sum()}/{len(derived)} studies)")
+
     derived = derived[~derived[ID_COL].isin(gold[ID_COL])]
 
     # Fold grouping. Two sources of leakage, and the scanner is the larger one:
@@ -438,6 +470,8 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--cache", type=Path, required=True)
     ap.add_argument("--labels", type=Path, required=True, help="report-derived labels CSV")
+    ap.add_argument("--borrow", action="append", metavar="FILE.csv:Label[,Label]",
+                    help="take these label columns from a second reader instead")
     ap.add_argument("--out", type=Path, default=Path("weights"))
     ap.add_argument("--backbone", default="resnet34")
     ap.add_argument("--folds", type=int, default=5)
