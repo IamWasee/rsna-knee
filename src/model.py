@@ -44,11 +44,18 @@ class ViTBackbone(nn.Module):
     them.
     """
 
-    def __init__(self, path: str, unfreeze_last: int = 6):
+    def __init__(self, path: str, unfreeze_last: int = 6, grad_checkpoint: bool = False):
         super().__init__()
         from transformers import AutoModel
 
         self.net = AutoModel.from_pretrained(path)
+        if grad_checkpoint:
+            # use_reentrant=False is required here, not cosmetic: the early blocks
+            # are frozen, so the input to the first checkpointed block does not
+            # require grad, and the reentrant implementation silently produces no
+            # gradient in that case.
+            self.net.gradient_checkpointing_enable(
+                gradient_checkpointing_kwargs={"use_reentrant": False})
         n = len(self.net.encoder.layer)
         for prm in self.net.parameters():
             prm.requires_grad = False
@@ -172,7 +179,8 @@ class KneeModel(nn.Module):
     def __init__(self, backbone: str = "resnet34", labels: list[str] | None = None,
                  pretrained: bool = True, dropout: float = 0.3,
                  head: str = "slot", pool: str = "focal", n_slot: int = 4,
-                 groups_per_slot: int = 3, unfreeze_last: int = 6):
+                 groups_per_slot: int = 3, unfreeze_last: int = 6,
+                 grad_checkpoint: bool = False):
         super().__init__()
         from config import LABELS
         labels = labels or LABELS
@@ -182,7 +190,8 @@ class KneeModel(nn.Module):
 
         if self.is_vit:
             # "dinov2:/kaggle/input/models/metaresearch/dinov2/pytorch/small/1"
-            self.encoder = ViTBackbone(backbone.split(":", 1)[1], unfreeze_last)
+            self.encoder = ViTBackbone(backbone.split(":", 1)[1], unfreeze_last,
+                                       grad_checkpoint)
         else:
             import timm
             # global_pool="" keeps the spatial map that focal pooling needs;
@@ -190,6 +199,18 @@ class KneeModel(nn.Module):
             # we are trying to avoid.
             self.encoder = timm.create_model(backbone, pretrained=pretrained,
                                              num_classes=0, global_pool="", in_chans=3)
+            # Every slice of a study goes through the encoder, so one study is
+            # n_slot * groups images -- 36 at the current geometry. That multiplier
+            # is why a base-size CNN would not fit on a T4 at ANY batch size while
+            # DINOv2-small ran at 8: it is not the study count that is large.
+            # Checkpointing trades ~30% step time for activations, which is the
+            # difference between "cannot run this encoder" and "can".
+            if grad_checkpoint:
+                try:
+                    self.encoder.set_grad_checkpointing(True)
+                except (AttributeError, NotImplementedError) as e:
+                    print(f"  {backbone} has no gradient checkpointing ({e}); "
+                          f"peak memory will be higher")
         dim = self.encoder.num_features
         self.focal = FocalPool() if pool == "focal" else None
         feat = dim * (2 if pool == "focal" else 1)

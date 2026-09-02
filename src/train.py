@@ -403,7 +403,8 @@ def train_fold(args, tr: pd.DataFrame, va: pd.DataFrame, gold: pd.DataFrame,
     model = KneeModel(args.backbone, LABELS, pretrained=args.pretrained,
                       head=args.head, pool=args.pool, n_slot=args.slots,
                       groups_per_slot=args.n_slices // 3,
-                      unfreeze_last=args.unfreeze_last).to(device)
+                      unfreeze_last=args.unfreeze_last,
+                      grad_checkpoint=args.grad_checkpoint).to(device)
 
     # A pretrained encoder driven at the head's rate forgets what it knew before it
     # learns the task, so the two get separate rates. For a CNN trained from an
@@ -483,6 +484,9 @@ def main() -> None:
                     help="encoder learning rate; for a pretrained ViT the public "
                          "baseline uses 8e-6 against a 1e-3 head, a 125x gap")
     ap.add_argument("--weight-decay", type=float, default=1e-2)
+    ap.add_argument("--grad-checkpoint", action="store_true",
+                    help="recompute activations instead of storing them; ~30%% slower "
+                         "per step but lets a base-size encoder fit at all")
     ap.add_argument("--unfreeze-last", type=int, default=6,
                     help="trainable transformer blocks from the output end (ViT only)")
     ap.add_argument("--workers", type=int, default=2)

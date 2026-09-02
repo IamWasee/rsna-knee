@@ -1,26 +1,26 @@
 # ============================================================
-# RSNA Knee — encoder bake-off on cache v3, fold 0
+# RSNA Knee — encoder bake-off, second attempt
 #
-# Evidence for running this: a public notebook on this exact competition published
-# its own encoder panel, measured on the gold studies --
+# The first attempt tested one encoder out of three and told us almost nothing.
+# Three faults, all mine:
 #
-#     coatnet_rmlp_2_rw_384  0.9025      convnext_base_384      0.8754
-#     swin_base_384          0.8825      convnext_large_384     0.8752
-#     convnext_336           0.8833      maxvit_384             0.8438
-#     effnetv2_l_480         0.8716
+#   1. CoAtNet printed NOTHING -- no result, no error. The probe only printed on
+#      success or on a non-OOM exception, so an encoder that ran out of memory at
+#      every batch size from 8 down to 1 was dropped in silence. That was the
+#      actual finding and it was invisible.
+#   2. The SwinV2 name was not a real timm model.
+#   3. ConvNeXt-base fit only at batch 1 -- 3,479 steps an epoch, 203 minutes --
+#      and scored 0.791 against DINOv2's 0.804. At batch 1 that is not a verdict
+#      on the encoder, it is a verdict on the batch size.
 #
-# CoAtNet won by 0.02 over the next architecture and by 0.06 over the worst. Our
-# DINOv2-small scores 0.804 held-out on this cache, so an encoder gap of that size
-# is worth more than anything else on the list.
+# The cause of all the memory pressure is structural: every slice of a study goes
+# through the encoder, so one study is 4 slots x 9 slices = 36 IMAGES. "Batch 8"
+# means 288 images per step. DINOv2-small (22M) survives that; a base-size CNN
+# cannot, at any batch size. Gradient checkpointing recomputes activations instead
+# of storing them -- about 30% slower per step, and the difference between "this
+# encoder is untestable" and "this encoder is testable".
 #
-# What this cell does NOT do is change resolution at the same time. Their panel was
-# run entirely at 384, so it compares encoders, not sizes -- and 4 slots x 9 slices
-# x 384px would be 23 GB against a 20 GB limit, forcing a cut in slice coverage as
-# well. Test the encoder first on the cache we already have. If CoAtNet wins here,
-# a 384 cache is worth building; if it does not, we saved the rebuild.
-#
-# Attach: competition, cache-v3, stevenleehans labels. GPU on, Internet on
-# (timm downloads the pretrained weights). ~2h.
+# Attach: competition, cache-v3, stevenleehans labels. GPU, Internet. ~3h.
 # ============================================================
 !pip install -q timm transformers
 
@@ -39,68 +39,84 @@ if not lab:
     describe(); raise SystemExit("attach stevenleehans/rsna-knee-llm-report-labels")
 print(f"cache: {CACHE}\nmeta:  {os.path.exists(CACHE + '/study_meta.csv')}")
 
-# ---- which candidates can actually be built and run at 288? --------------------
-# CoAtNet's -384 weights carry relative-position tables sized for 384, and Swin
-# needs the window to divide the feature map. Rather than discover that at epoch 3
-# of a 45-minute fold, build each candidate now, push one real batch through it,
-# and find the largest batch size that fits. A candidate that fails here is skipped
-# with its error printed instead of taking the GPU down with it.
-import torch, timm, numpy as np
-CANDIDATES = [
-    ("coatnet_rmlp_2_rw_384", 5e-5),
-    ("convnext_base.fb_in22k_ft_in1k", 5e-5),
-    ("swinv2_base_window12to16_192to256_ms_in22k_ft_in1k", 5e-5),
-]
-SIZE, N_IMG = 288, 36          # 4 slots x 9 slices, all of them go through the encoder
+import torch, timm
+SIZE, N_IMG = 288, 36
 
-viable = []
-for name, lr in CANDIDATES:
+# Names are guesses against whatever timm version Kaggle ships, so ask it rather
+# than trusting the list. Anything that does not exist is reported and skipped.
+WANT = ["coatnet_rmlp_2_rw_224", "coatnet_rmlp_1_rw_224", "coatnet_2_rw_224",
+        "convnext_small.fb_in22k_ft_in1k", "convnext_tiny.fb_in22k_ft_in1k",
+        "swin_small_patch4_window7_224", "maxvit_rmlp_small_rw_224"]
+known = set(timm.list_models())
+CANDIDATES = [n for n in WANT if n.split(".")[0] in known or n in known]
+print(f"\n{len(CANDIDATES)}/{len(WANT)} candidate names exist in timm "
+      f"{timm.__version__}: {CANDIDATES}")
+for n in WANT:
+    if n not in CANDIDATES:
+        print(f"  not a model in this timm: {n}")
+
+def probe(name):
+    """Largest batch that fits, with checkpointing on. Returns 0 and SAYS SO if
+    nothing fits -- the silence in the last run is what wasted it."""
     try:
         m = timm.create_model(name, pretrained=True, num_classes=0,
                               global_pool="", in_chans=3).cuda().train()
     except Exception as e:
-        print(f"SKIP {name}: build failed -- {type(e).__name__}: {str(e)[:120]}")
-        continue
-    fitted = 0
+        print(f"  SKIP {name}: build failed -- {type(e).__name__}: {str(e)[:100]}")
+        return 0
+    try:
+        m.set_grad_checkpointing(True)
+        ckpt = "checkpointed"
+    except Exception:
+        ckpt = "NO checkpointing available"
+    last = ""
     for b in (8, 6, 4, 3, 2, 1):
+        x = None
         try:
             torch.cuda.empty_cache()
             x = torch.randn(b * N_IMG, 3, SIZE, SIZE, device="cuda")
-            y = m(x)
-            y.float().mean().backward()
-            fitted = b
-            print(f"OK   {name}: batch {b} fits, feature map {tuple(y.shape)}")
-            break
+            m(x).float().mean().backward()
+            peak = torch.cuda.max_memory_allocated() / 2**30
+            print(f"  OK   {name}: batch {b} ({b*N_IMG} images), {ckpt}, "
+                  f"peak {peak:.1f} GB, map {tuple(m(x).shape)}")
+            del m, x; torch.cuda.empty_cache()
+            return b
         except RuntimeError as e:
-            if "out of memory" not in str(e).lower():
-                print(f"SKIP {name}: {str(e)[:140]}"); break
+            last = str(e)[:110]
+            if "out of memory" not in last.lower():
+                print(f"  SKIP {name}: {last}")
+                del m; torch.cuda.empty_cache()
+                return 0
         finally:
             del x
-            for p in m.parameters():
+            for p in m.parameters() if m is not None else []:
                 p.grad = None
-            torch.cuda.empty_cache()
-    if fitted:
-        viable.append((name, lr, fitted))
+            torch.cuda.reset_peak_memory_stats(); torch.cuda.empty_cache()
+    print(f"  SKIP {name}: out of memory even at batch 1 ({ckpt}). last: {last}")
     del m; torch.cuda.empty_cache()
+    return 0
 
+print("\nprobing:")
+viable = [(n, b) for n in CANDIDATES for b in [probe(n)] if b >= 2]
 if not viable:
-    raise SystemExit("no candidate encoder could be built and run at 288px")
-print("\nrunning:", [(n, b) for n, _, b in viable])
+    raise SystemExit("nothing fits at batch 2 or more, even checkpointed -- the "
+                     "36-images-per-study geometry is the constraint, not the encoder")
 
-# ---- train each on fold 0 ------------------------------------------------------
-# Batch size differs per encoder because memory does, so these are not perfectly
-# matched runs. An encoder that only fits at batch 2 is carrying that handicap into
-# its number -- read a narrow loss as inconclusive, not as a verdict.
+# Two arms only. Three would not finish inside the session at these batch sizes.
+viable = sorted(viable, key=lambda t: -t[1])[:2]
+print(f"\ntraining: {viable}")
+
 t0 = time.time()
-for name, lr, batch in viable:
+for name, batch in viable:
     tag = name.split(".")[0].replace("_", "-")[:24]
-    print("\n" + "=" * 64 + f"\n{name}   (batch {batch}, backbone lr {lr})\n" + "=" * 64)
+    print("\n" + "=" * 64 + f"\n{name}  (batch {batch}, checkpointed)\n" + "=" * 64)
     !python $CODE/src/train.py --cache "$CACHE" --labels "{lab[0]}" \
         --backbone "{name}" --size 288 --only-fold 0 --epochs 12 --batch {batch} \
-        --lr 1e-3 --lr-backbone {lr} --weight-decay 0.02 \
+        --lr 1e-3 --lr-backbone 5e-5 --weight-decay 0.02 --grad-checkpoint \
         --head slot --pool focal --out /kaggle/working/enc_{tag}
     print(f"elapsed {(time.time()-t0)/60:.0f} min")
 
 print("\n" + "=" * 64)
-print("Compare 'fold 0 best OOF macro AUC' across the blocks above.")
-print("DINOv2-small on this same cache, same fold, same head: 0.804")
+print("Baselines on this same cache, fold 0, slot+focal head:")
+print("  DINOv2-small, batch 8 ......... 0.804")
+print("  ConvNeXt-base, batch 1 ........ 0.791  (batch-1 handicap, not a verdict)")
