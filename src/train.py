@@ -131,6 +131,14 @@ def normalise_label_table(path: Path) -> pd.DataFrame:
     else:
         df = df[[ID_COL] + LABELS]
 
+    # A published table can list the same study twice. Two rows for one study is
+    # two entries in the training frame, one cache read counted twice in the loss,
+    # and -- worse -- the same study on both sides of a fold boundary.
+    n_dup = int(df[ID_COL].duplicated().sum())
+    if n_dup:
+        print(f"  {n_dup} duplicate study ids -> keeping the first row of each")
+        df = df.drop_duplicates(subset=[ID_COL], keep="first")
+
     for c in [c for c in df.columns if c != ID_COL]:
         df[c] = pd.to_numeric(df[c], errors="coerce")
     for c in df.columns:

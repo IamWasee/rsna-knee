@@ -44,9 +44,16 @@ gold = train[train[LABELS].notna().all(axis=1)].set_index(ID_COL)
 print(f"{len(gold)} annotated studies\n")
 
 # ---------------------------------------------------------------- 1. per label
-def per_label(df):
+def per_label(df, name=""):
     if ID_COL not in df.columns:
         return None
+    # A published table can carry the same study twice. Reindexing against a
+    # duplicated axis raises, and silently keeping both would double that study's
+    # weight in training -- so drop and say so.
+    n_dup = int(df[ID_COL].duplicated().sum())
+    if n_dup:
+        print(f"  NOTE {name}: {n_dup} duplicate study ids, keeping the first of each")
+        df = df.drop_duplicates(subset=[ID_COL], keep="first")
     sub = df.set_index(ID_COL).reindex(gold.index)
     out = {}
     for c in LABELS:
@@ -68,9 +75,14 @@ for f in sorted(glob.glob("/kaggle/input/**/*.csv", recursive=True)):
         df = pd.read_csv(f)
     except Exception:
         continue
-    got = per_label(df)
+    nm = os.path.basename(f)[:-4][:26]
+    try:
+        got = per_label(df, nm)
+    except Exception as e:
+        print(f"  SKIP {nm}: {type(e).__name__}: {str(e)[:90]}")
+        continue
     if got and len(got) >= 10:
-        tables[os.path.basename(f)[:-4][:26]] = got
+        tables[nm] = got
 
 if not tables:
     raise SystemExit("no usable label tables found -- attach the datasets listed above")
