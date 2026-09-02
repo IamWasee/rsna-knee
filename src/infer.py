@@ -118,6 +118,31 @@ def tta_views(x: torch.Tensor, n: int) -> list[torch.Tensor]:
     return views
 
 
+def rank_average(per_model: np.ndarray) -> np.ndarray:
+    """Combine the folds by rank, not by probability.
+
+    The metric is AUC per label, which reads only the ordering of the studies. Two
+    folds trained on different data are not calibrated to each other, so averaging
+    their probabilities lets whichever fold happens to be more confident dominate a
+    label it may be no better at. Ranking each fold's predictions per label first
+    throws the scale away and keeps only what the metric actually reads.
+
+    per_model is (folds, studies, labels); the result is (studies, labels).
+    """
+    if per_model.ndim != 3:
+        raise SystemExit(
+            f"rank_average expects (folds, studies, labels), got {per_model.shape}. "
+            "A 2-D array here means the per-fold predictions were concatenated along "
+            "the wrong axis and the folds have been mixed into the study dimension."
+        )
+    m, n, k = per_model.shape
+    out = np.zeros((n, k), dtype=np.float64)
+    for i in range(m):
+        for j in range(k):
+            out[:, j] += pd.Series(per_model[i, :, j]).rank(pct=True).to_numpy()
+    return out / m
+
+
 @torch.no_grad()
 def predict(models: list, loader: DataLoader, device: str,
             tta: int = 1) -> tuple[np.ndarray, list]:
@@ -137,7 +162,11 @@ def predict(models: list, loader: DataLoader, device: str,
         ids.extend(sid)
         if (i + 1) % 25 == 0 or i + 1 == len(loader):
             print(f"  {i+1}/{len(loader)}", flush=True)
-    return np.concatenate(preds), ids
+    # axis=1: each entry is (folds, batch, labels) and the batches join along the
+    # STUDY axis. The default axis=0 stacks them along the fold axis instead, which
+    # is invisible with a single batch -- the 3-study placeholder test set is one
+    # batch -- and silently reduces the real test set to its last batch.
+    return np.concatenate(preds, axis=1), ids
 
 
 def main() -> None:
@@ -188,6 +217,11 @@ def main() -> None:
     preds = rank_average(per_model)
     print(f"rank-averaged {per_model.shape[0]} fold(s) over {per_model.shape[1]} studies")
 
+    if len(preds) != len(ids):
+        raise SystemExit(
+            f"{len(preds)} predictions for {len(ids)} studies -- these must match; "
+            "the fold axis has leaked into the study axis."
+        )
     sub = pd.DataFrame(preds, columns=LABELS)
     sub.insert(0, ID_COL, ids)
 
