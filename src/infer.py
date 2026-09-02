@@ -70,13 +70,24 @@ def check_parity(train_manifest: dict, cache: Path) -> None:
         raise SystemExit(f"no cache_manifest.json in {cache}; cannot verify parity")
 
     test = json.loads(p.read_text())
-    fields = ["slots", "size", "crop_mm", "n_anchors", "group", "n_slices", "band"]
-    bad = [(f, train_manifest.get(f), test.get(f)) for f in fields
-           if train_manifest.get(f) != test.get(f)]
+    # laterality defaults to False for manifests written before it existed: a cache
+    # with no such key was built without it. Left it out of this list and a model
+    # trained on unnormalised knees would be served mirrored ones at test time --
+    # every pixel moved, the tensor shape unchanged, and nothing in the log.
+    fields = ["slots", "size", "crop_mm", "n_anchors", "group", "n_slices", "band",
+              "laterality"]
+    bad = [(f, train_manifest.get(f, False if f == "laterality" else None),
+            test.get(f, False if f == "laterality" else None))
+           for f in fields
+           if train_manifest.get(f, False if f == "laterality" else None)
+           != test.get(f, False if f == "laterality" else None)]
     if bad:
         lines = "\n".join(f"    {f}: trained on {a!r}, test cache has {b!r}"
                           for f, a, b in bad)
-        raise SystemExit("cache/checkpoint preprocessing mismatch:\n" + lines)
+        hint = ("\n  laterality differs: pass --no-laterality to preprocess.py to match"
+                " a cache built before it existed, or retrain on a normalised cache."
+                if any(f == "laterality" for f, _, _ in bad) else "")
+        raise SystemExit("cache/checkpoint preprocessing mismatch:\n" + lines + hint)
     print(f"  preprocessing parity verified ({len(fields)} fields match)")
 
 

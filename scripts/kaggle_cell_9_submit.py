@@ -139,9 +139,16 @@ _man = _ck.get("cache_manifest", {})
 SLOTS = _man.get("slots", _a.get("slots", _a.get("n_series", 4)))
 SIZE = _man.get("size", _a.get("size", 256))
 CROP = _man.get("crop_mm", 140.0)
+ANCHORS = _man.get("n_anchors", 3)
+# Absent means the cache predates laterality normalisation, so it was built
+# without it. Getting this wrong mirrors every test knee relative to training
+# without changing a single tensor shape; infer.py refuses the mismatch, but the
+# point is to not create it.
+LAT = "" if _man.get("laterality", False) else "--no-laterality"
 print(f"training cache: slots={SLOTS} size={SIZE} crop_mm={CROP} "
       f"n_slices={_man.get('n_slices', _a.get('n_slices'))}")
-print(f"checkpoint expects: slots={SLOTS} n_slices={_a.get('n_slices')} size={SIZE}")
+print(f"checkpoint expects: slots={SLOTS} n_slices={_a.get('n_slices')} size={SIZE} "
+      f"anchors={ANCHORS} laterality={_man.get('laterality', False)}")
 if _a.get("n_slices") not in (9, None):
     print(f"  WARNING: this checkpoint wants {_a['n_slices']} slices per slot, but "
           f"preprocess.py now produces 9. These weights predate the v2 layout and "
@@ -150,7 +157,7 @@ if _a.get("n_slices") not in (9, None):
 # 1. Preprocess the hidden test set. Measured at 2.73 studies/sec with 4 workers,
 #    so even 20,000 studies is ~2h of the 9h budget.
 !python $SRC/preprocess.py --out $CACHE --split test --workers 4 \
-    --slots $SLOTS --size $SIZE --crop-mm $CROP
+    --slots $SLOTS --size $SIZE --crop-mm $CROP --anchors $ANCHORS $LAT
 print(f"preprocess: {(time.time()-t0)/60:.1f} min")
 
 # 2. Predict and write submission.csv at the path Kaggle expects.

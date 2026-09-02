@@ -373,6 +373,7 @@ def main() -> None:
     manifest = {"slots": args.slots, "size": args.size, "crop_mm": args.crop_mm,
                 "n_anchors": args.anchors, "group": GROUP,
                 "n_slices": args.anchors * GROUP, "band": [0.15, 0.85],
+                "laterality": not args.no_laterality,
                 "slot_scheme": [list(x) for x in SLOTS[:args.slots]], "split": args.split}
     (args.out / "cache_manifest.json").write_text(json.dumps(manifest, indent=2))
     print("manifest:", json.dumps(manifest))
