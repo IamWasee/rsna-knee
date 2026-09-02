@@ -52,6 +52,26 @@ def main() -> None:
     if not args.cell.exists():
         raise SystemExit(f"no such driver: {args.cell}")
 
+    # Refuse the one mistake this project keeps making. A recursive glob rooted at
+    # /kaggle/input descends 24,371 DICOM series -- measured at 400+ seconds per
+    # call -- and it has been written into five separate cells now, the last of
+    # which ran for an hour before anyone noticed. kaggle_paths.find() prunes the
+    # competition tree and is the only correct way to locate an attached file.
+    # Comments are stripped first: this file and the cells both describe the
+    # anti-pattern in prose, and a guard that fires on its own documentation is a
+    # guard people switch off.
+    body = "\n".join(l for l in args.cell.read_text().splitlines()
+                     if not l.lstrip().startswith("#"))
+    import re as _re
+    bad = _re.search(r"glob\([^)]*/kaggle/input[^)]*\*\*", body) or (
+        "recursive=True" in body and "/kaggle/input" in body)
+    if bad:
+        raise SystemExit(
+            f"{args.cell.name} recursively globs /kaggle/input.\n"
+            "That walks the whole DICOM archive (400+ s per call).\n"
+            "Use: from kaggle_paths import find, competition_file, describe"
+        )
+
     meta = {
         "id": f"{OWNER}/{args.slug}",
         "title": args.slug,

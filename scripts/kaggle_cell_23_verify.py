@@ -36,10 +36,16 @@ CODE = "/kaggle/working/rsna-knee"
 !rm -rf $CODE && git clone -q https://github.com/IamWasee/rsna-knee.git $CODE
 sys.path.insert(0, f"{CODE}/src")
 from config import ID_COL, LABELS
+from kaggle_paths import find, competition_file
 from sklearn.metrics import roc_auc_score
 
-TRAIN = next(iter(glob.glob("/kaggle/input/competitions/**/train.csv", recursive=True)))
-train = pd.read_csv(TRAIN)
+# find() prunes the competition directory from the traversal. A raw
+# glob("/kaggle/input/**/*.csv", recursive=True) descends 24,371 DICOM series --
+# measured at 400+ seconds per call, and this cell used to make seven of them.
+CSVS = [f for f in find(suffix=".csv") if os.path.getsize(f) < 40e6]
+print(f"{len(CSVS)} candidate label tables attached")
+
+train = pd.read_csv(competition_file("train.csv"))
 gold = train[train[LABELS].notna().all(axis=1)].set_index(ID_COL)
 print(f"{len(gold)} annotated studies\n")
 
@@ -67,9 +73,10 @@ def per_label(df, name=""):
         out[c] = roc_auc_score(y[ok], p[ok])
     return out or None
 
-tables = {}
-for f in sorted(glob.glob("/kaggle/input/**/*.csv", recursive=True)):
-    if os.path.getsize(f) > 40e6 or os.path.basename(f) in ("train.csv", "test.csv"):
+tables, paths = {}, {}
+for f in CSVS:
+    if os.path.basename(f) in ("train.csv", "test.csv", "train_series.csv",
+                               "test_series.csv", "sample_submission.csv"):
         continue
     try:
         df = pd.read_csv(f)
@@ -83,6 +90,7 @@ for f in sorted(glob.glob("/kaggle/input/**/*.csv", recursive=True)):
         continue
     if got and len(got) >= 10:
         tables[nm] = got
+        paths[nm] = f
 
 if not tables:
     raise SystemExit("no usable label tables found -- attach the datasets listed above")
@@ -112,13 +120,13 @@ print("the 95% interval on a single-label AUC is roughly +/-0.10.")
 print("\n" + "=" * 60 + "\nTARGET VARIANCE -- is a label degenerate?\n" + "=" * 60)
 print(f"{'source':<28}{'label':<18}{'modal share':>12}{'std':>8}")
 for n in names:
-    for f in glob.glob("/kaggle/input/**/*.csv", recursive=True):
-        if os.path.basename(f)[:-4][:26] != n:
-            continue
-        try:
-            df = pd.read_csv(f)
-        except Exception:
-            continue
+    # paths was recorded during the scan above; re-globbing per table is what
+    # turned a three-minute cell into an hour-long one.
+    try:
+        df = pd.read_csv(paths[n])
+    except Exception:
+        continue
+    if True:
         for c in ("Fracture", "PF OA", "Synovitis"):
             if c not in df:
                 continue
@@ -128,7 +136,6 @@ for n in names:
             share = v.value_counts(normalize=True).iloc[0]
             flag = "  <-- near-degenerate, almost no gradient" if share > 0.9 else ""
             print(f"{n:<28}{c:<18}{share:>12.1%}{v.std():>8.3f}{flag}")
-        break
 
 # ---------------------------------------------------------------- 3. the crop
 print("\n" + "=" * 60 + "\nFIELD OF VIEW -- is the 140mm crop doing anything?\n" + "=" * 60)
@@ -139,7 +146,10 @@ series = pd.read_csv(root / "train_series.csv")
 rows, seen = [], 0
 for r in series.sample(min(400, len(series)), random_state=0).itertuples():
     d = root / "train_series" / getattr(r, ID_COL) / getattr(r, "SeriesInstanceUID")
-    fs = sorted(glob.glob(str(d / "*.dcm")))
+    try:
+        fs = sorted(e.path for e in os.scandir(d) if e.name.endswith(".dcm"))
+    except OSError:
+        continue
     if not fs:
         continue
     try:
