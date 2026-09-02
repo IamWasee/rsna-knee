@@ -25,23 +25,36 @@
 # ============================================================
 import sys, os, time, shutil, glob
 
-SRC = None
+# Find src/, and INSIST on the stamped copy. Every training notebook saves its
+# own `git clone` into its output, so /kaggle/input holds several copies of this
+# repo frozen at whatever commit that run cloned. The first walk found full-v3's
+# copy -- which predates the rank_average fix -- and inference died on the exact
+# bug the dataset exists to carry the fix for. Only SRC_VERSION.txt distinguishes
+# them, so require it rather than taking the first infer.py that turns up.
+stamped, fallbacks = [], []
 for root, dirs, files in os.walk("/kaggle/input", followlinks=True):
     if "rsna-knee-abnormality-detection" in root:
         dirs[:] = []                      # never descend the DICOM archive
         continue
     if "infer.py" in files and "preprocess.py" in files:
-        SRC = root
-        break
-if SRC is None:
+        (stamped if "SRC_VERSION.txt" in files else fallbacks).append(root)
+
+if not stamped:
     raise SystemExit(
-        "src/ not found. Attach the dataset abdullahwasee/rsna-knee-src.\n"
-        "Do NOT add a git clone -- this notebook must run with internet off."
+        "no stamped src/ found. Attach the dataset abdullahwasee/rsna-knee-src.\n"
+        + (f"Unstamped copies were found and deliberately NOT used:\n"
+           + "\n".join(f"    {f}" for f in fallbacks)
+           + "\nThose are snapshots saved inside older notebook outputs; running "
+             "them would submit whatever code that run happened to clone.\n"
+           if fallbacks else "")
+        + "Publish it with: python scripts/sync_src.py"
     )
+SRC = stamped[0]
 sys.path.insert(0, SRC)
-ver = os.path.join(SRC, "SRC_VERSION.txt")
 print(f"src: {SRC}")
-print(f"version: {open(ver).read().strip() if os.path.exists(ver) else 'unstamped'}")
+print(f"version: {open(os.path.join(SRC, 'SRC_VERSION.txt')).read().strip()}")
+for f in fallbacks:
+    print(f"  ignoring unstamped copy: {f}")
 
 from kaggle_paths import find, describe
 
