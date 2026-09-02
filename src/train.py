@@ -447,7 +447,7 @@ def main() -> None:
     ap.add_argument("--slots", type=int, default=4)
     ap.add_argument("--n-slices", type=int, default=9)
     ap.add_argument("--size", type=int, default=256)
-    ap.add_argument("--head", default="slot", choices=["slot", "shared"],
+    ap.add_argument("--head", default="slot", choices=["slot", "slotpos", "shared"],
                     help="slot: one attention query per diagnosis over sequence types; "
                          "shared: a single attention for all twelve labels")
     ap.add_argument("--pool", default="focal", choices=["focal", "gap"],

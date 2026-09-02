@@ -96,10 +96,23 @@ class FocalPool(nn.Module):
 
 
 class SlotHead(nn.Module):
-    """One attention query per diagnosis, over the slot embeddings of a study."""
+    """One attention query per diagnosis, over the slot embeddings of a study.
+
+    With n_group > 1 the anchor groups are kept as separate tokens instead of being
+    averaged, and each carries an embedding of WHERE along the slice stack it came
+    from. That position is not decoration. After laterality normalisation the
+    sagittal stack runs medial to lateral, so the group index IS the medial-lateral
+    axis -- and four of the twelve labels are medial/lateral pairs, two of them
+    (Lateral Meniscus, Lateral OA) among the weakest we have. Averaging the groups
+    first destroyed the only signal that separates a medial finding from a lateral
+    one.
+
+    n_group == 1 reproduces the earlier behaviour exactly, so existing checkpoints
+    still load and the two can be compared rather than swapped on faith.
+    """
 
     def __init__(self, dim: int, n_slot: int, labels: list[str], hidden: int = 256,
-                 p: float = 0.2, prior: bool = True):
+                 p: float = 0.2, prior: bool = True, n_group: int = 1):
         super().__init__()
         self.proj = nn.Sequential(nn.LayerNorm(dim), nn.Linear(dim, hidden), nn.GELU())
         self.slot_emb = nn.Parameter(torch.randn(n_slot, hidden) * 0.02)
@@ -107,18 +120,32 @@ class SlotHead(nn.Module):
         self.drop = nn.Dropout(p)
         self.out = nn.Linear(hidden, len(labels))
         self.hidden = hidden
+        self.n_slot, self.n_group = n_slot, n_group
+        if n_group > 1:
+            self.group_emb = nn.Parameter(torch.randn(n_group, hidden) * 0.02)
 
+        # The prior says which sequence types a finding lives in; it says nothing
+        # about position within the stack, so it repeats across the groups.
         bias = torch.zeros(len(labels), n_slot)
         if prior:
             for i, t in enumerate(labels):
                 for s in SLOT_PRIOR.get(t, ()):
                     if s < n_slot:
                         bias[i, s] = PRIOR_STRENGTH
+        if n_group > 1:
+            bias = bias.repeat_interleave(n_group, dim=1)
         self.register_buffer("slot_prior", bias)
 
     def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        # x: (B, n_slot, dim)
-        h = self.proj(x) + self.slot_emb
+        # x: (B, n_slot, dim), or (B, n_slot * n_group, dim) when n_group > 1
+        h = self.proj(x)
+        if self.n_group > 1:
+            b, n, _ = h.shape
+            h = h.view(b, self.n_slot, self.n_group, self.hidden)
+            h = (h + self.slot_emb[None, :, None, :]
+                   + self.group_emb[None, None, :, :]).reshape(b, n, self.hidden)
+        else:
+            h = h + self.slot_emb
         att = torch.einsum("bsh,oh->bos", h, self.query) / self.hidden ** 0.5
         att = (att + self.slot_prior.unsqueeze(0)).softmax(-1)
         ctx = self.drop(torch.einsum("bos,bsh->boh", att, h))
@@ -167,8 +194,9 @@ class KneeModel(nn.Module):
         self.focal = FocalPool() if pool == "focal" else None
         feat = dim * (2 if pool == "focal" else 1)
 
-        if head == "slot":
-            self.head = SlotHead(feat, n_slot, labels)
+        if head in ("slot", "slotpos"):
+            self.head = SlotHead(feat, n_slot, labels,
+                                 n_group=groups_per_slot if head == "slotpos" else 1)
         else:
             self.pool = AttentionPool(feat)   # name kept: old checkpoints load
             self.head = nn.Sequential(nn.Dropout(dropout), nn.Linear(feat, len(labels)))
@@ -188,6 +216,11 @@ class KneeModel(nn.Module):
             # sequence type -- the thing anatomy actually distinguishes -- not over the
             # arbitrary index of a slice group.
             feats = feats.view(b, self.n_slot, self.groups, -1).mean(2)
+            logits, attn = self.head(feats)
+        elif self.head_kind == "slotpos":
+            # Keep the groups. The index is not arbitrary: the groups are ordered
+            # along the slice stack, so on a normalised sagittal series it runs
+            # medial to lateral. The head gets a position embedding per group.
             logits, attn = self.head(feats)
         else:
             pooled, attn = self.pool(feats)
