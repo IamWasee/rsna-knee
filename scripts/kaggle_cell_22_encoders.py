@@ -56,48 +56,78 @@ for n in WANT:
         print(f"  not a model in this timm: {n}")
 
 def probe(name):
-    """Largest batch that fits, with checkpointing on. Returns 0 and SAYS SO if
-    nothing fits -- the silence in the last run is what wasted it."""
-    try:
-        m = timm.create_model(name, pretrained=True, num_classes=0,
-                              global_pool="", in_chans=3).cuda().train()
-    except Exception as e:
-        print(f"  SKIP {name}: build failed -- {type(e).__name__}: {str(e)[:100]}")
-        return 0
-    try:
-        m.set_grad_checkpointing(True)
-        ckpt = "checkpointed"
-    except Exception:
-        ckpt = "NO checkpointing available"
-    last = ""
-    for b in (8, 6, 4, 3, 2, 1):
-        x = None
+    """Largest batch that fits, with checkpointing on.
+
+    Returns 0 and SAYS WHY in every failing case. The first version printed
+    nothing on out-of-memory, and the second crashed because its `finally` block
+    touched a model the `try` had already deleted. No `del` inside the try now,
+    and no cleanup that references anything conditionally bound.
+    """
+    m = None
+    # coatnet_rmlp bakes its relative-position table to the training resolution:
+    # at 288 it asks for 18x18 and finds 14x14. timm can rebuild the table if the
+    # model takes img_size, so offer it and fall back for models that do not.
+    for kwargs in ({"img_size": SIZE}, {}):
         try:
-            torch.cuda.empty_cache()
+            m = timm.create_model(name, pretrained=True, num_classes=0,
+                                  global_pool="", in_chans=3, **kwargs)
+            if kwargs:
+                print(f"  (built {name} with img_size={SIZE})")
+            break
+        except TypeError:
+            continue
+        except Exception as e:
+            print(f"  SKIP {name}: build failed -- {type(e).__name__}: {str(e)[:100]}")
+            return 0
+    if m is None:
+        print(f"  SKIP {name}: could not be built at any setting")
+        return 0
+
+    m = m.cuda().train()
+    try:
+        m.set_grad_checkpointing(True); ckpt = "checkpointed"
+    except Exception:
+        ckpt = "NO checkpointing"
+
+    fitted, last = 0, ""
+    for b in (8, 6, 4, 3, 2, 1):
+        try:
+            torch.cuda.empty_cache(); torch.cuda.reset_peak_memory_stats()
             x = torch.randn(b * N_IMG, 3, SIZE, SIZE, device="cuda")
-            m(x).float().mean().backward()
-            peak = torch.cuda.max_memory_allocated() / 2**30
-            print(f"  OK   {name}: batch {b} ({b*N_IMG} images), {ckpt}, "
-                  f"peak {peak:.1f} GB, map {tuple(m(x).shape)}")
-            del m, x; torch.cuda.empty_cache()
-            return b
+            y = m(x)
+            y.float().mean().backward()
+            print(f"  OK   {name}: batch {b} ({b*N_IMG} images), {ckpt}, peak "
+                  f"{torch.cuda.max_memory_allocated()/2**30:.1f} GB, "
+                  f"map {tuple(y.shape)}")
+            fitted = b
         except RuntimeError as e:
             last = str(e)[:110]
             if "out of memory" not in last.lower():
                 print(f"  SKIP {name}: {last}")
-                del m; torch.cuda.empty_cache()
-                return 0
-        finally:
-            del x
-            for p in m.parameters() if m is not None else []:
-                p.grad = None
-            torch.cuda.reset_peak_memory_stats(); torch.cuda.empty_cache()
-    print(f"  SKIP {name}: out of memory even at batch 1 ({ckpt}). last: {last}")
-    del m; torch.cuda.empty_cache()
-    return 0
+                break
+        for prm in m.parameters():
+            prm.grad = None
+        if fitted:
+            break
+    if not fitted and last and "out of memory" in last.lower():
+        print(f"  SKIP {name}: out of memory even at batch 1 ({ckpt})")
+    del m
+    torch.cuda.empty_cache()
+    return fitted
+
 
 print("\nprobing:")
-viable = [(n, b) for n in CANDIDATES for b in [probe(n)] if b >= 2]
+viable = []
+for n in CANDIDATES:
+    # Two probe bugs in two attempts have each cost a run, so one bad candidate
+    # is not allowed to end the cell.
+    try:
+        b = probe(n)
+    except Exception as e:
+        print(f"  SKIP {n}: probe raised {type(e).__name__}: {str(e)[:100]}")
+        b = 0
+    if b >= 2:
+        viable.append((n, b))
 if not viable:
     raise SystemExit("nothing fits at batch 2 or more, even checkpointed -- the "
                      "36-images-per-study geometry is the constraint, not the encoder")
@@ -111,7 +141,7 @@ for name, batch in viable:
     tag = name.split(".")[0].replace("_", "-")[:24]
     print("\n" + "=" * 64 + f"\n{name}  (batch {batch}, checkpointed)\n" + "=" * 64)
     !python $CODE/src/train.py --cache "$CACHE" --labels "{lab[0]}" \
-        --backbone "{name}" --size 288 --only-fold 0 --epochs 12 --batch {batch} \
+        --backbone "{name}" --size 288 --only-fold 0 --epochs 10 --batch {batch} \
         --lr 1e-3 --lr-backbone 5e-5 --weight-decay 0.02 --grad-checkpoint \
         --head slot --pool focal --out /kaggle/working/enc_{tag}
     print(f"elapsed {(time.time()-t0)/60:.0f} min")

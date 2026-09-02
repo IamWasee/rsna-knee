@@ -91,6 +91,26 @@ def main() -> None:
         "machine_shape": "NvidiaTeslaT4" if args.gpu else "None",
     }
 
+    # Syntax-check the driver with the shell magics removed. A cell that does not
+    # parse costs a queue slot and however long Kaggle takes to reach it, and the
+    # `!cmd \` line-continuations mean a naive strip leaves dangling arguments.
+    lines, py = body.splitlines(), []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        if line.lstrip().startswith("!"):
+            while line.rstrip().endswith("\\") and i + 1 < len(lines):
+                i += 1
+                line = lines[i]
+        else:
+            py.append(line)
+        i += 1
+    try:
+        import ast as _ast
+        _ast.parse("\n".join(py))
+    except SyntaxError as e:
+        raise SystemExit(f"{args.cell.name} does not parse: line {e.lineno}: {e.msg}")
+
     with tempfile.TemporaryDirectory() as d:
         d = Path(d)
         (d / f"{args.slug}.ipynb").write_text(json.dumps(notebook(args.cell.read_text())))
