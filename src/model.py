@@ -48,6 +48,19 @@ class ViTBackbone(nn.Module):
         super().__init__()
         from transformers import AutoModel
 
+        # The checkpoint records the mount path it was trained from, so inference
+        # needs that same model attached even though the weights come from the
+        # checkpoint -- transformers still reads the architecture config from disk.
+        # Without this check it fails as an HFValidationError about repo ids,
+        # which says nothing about the actual problem.
+        import os as _os
+        if not _os.path.isdir(path):
+            raise SystemExit(
+                f"backbone config not found at {path}\n"
+                f"These checkpoints were trained from that mount, so the same model "
+                f"must be attached to this notebook.\n"
+                f"Add Input -> Models -> metaresearch/dinov2 (PyTorch, small, v1)."
+            )
         self.net = AutoModel.from_pretrained(path)
         if grad_checkpoint:
             # use_reentrant=False is required here, not cosmetic: the early blocks
