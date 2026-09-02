@@ -46,6 +46,8 @@ def main() -> None:
     ap.add_argument("--kernel", action="append", default=[],
                     help="another kernel whose OUTPUT this one reads")
     ap.add_argument("--no-competition", action="store_true")
+    ap.add_argument("--no-internet", action="store_true",
+                    help="required for a submission notebook; also rules out git clone")
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
 
@@ -65,6 +67,21 @@ def main() -> None:
     import re as _re
     bad = _re.search(r"glob\([^)]*/kaggle/input[^)]*\*\*", body) or (
         "recursive=True" in body and "/kaggle/input" in body)
+    # Only shell-magic lines and subprocess calls actually reach the network. An
+    # earlier version matched the bare text and rejected a cell whose own error
+    # message told the reader not to add a git clone.
+    if args.no_internet:
+        net = [l.strip() for l in body.splitlines()
+               if (l.lstrip().startswith(("!", "%")) or "subprocess" in l)
+               and ("git clone" in l or "pip install" in l or "wget" in l
+                    or "curl" in l)]
+        if net:
+            raise SystemExit(
+                f"{args.cell.name} reaches the network, but --no-internet is set:\n"
+                + "\n".join(f"    {l}" for l in net[:5])
+                + "\nA submission notebook has no network. Attach "
+                  "abdullahwasee/rsna-knee-src and import from it."
+            )
     if bad:
         raise SystemExit(
             f"{args.cell.name} recursively globs /kaggle/input.\n"
@@ -81,7 +98,7 @@ def main() -> None:
         "is_private": True,
         "enable_gpu": args.gpu,
         "enable_tpu": False,
-        "enable_internet": True,
+        "enable_internet": not args.no_internet,
         "keywords": ["gpu"] if args.gpu else [],
         "dataset_sources": args.dataset,
         "kernel_sources": [k if "/" in k else f"{OWNER}/{k}" for k in args.kernel],
