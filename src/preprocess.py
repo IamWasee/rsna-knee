@@ -338,8 +338,18 @@ def main() -> None:
     # Side and scanner per study. The scanner is what folds must be grouped on:
     # random splits let a model memorise the site instead of the knee, worth an
     # inflated 0.053 macro AUC by one competitor's measurement.
+    out_csv = args.out / "study_meta.csv"
+
+    # Merge rather than overwrite. Studies already on disk return "cached" and
+    # contribute no row, so a full run that follows a --limit smoke test would
+    # otherwise drop the smoke test's studies from the file entirely -- and a study
+    # missing here is a study whose fold cannot be grouped by scanner.
+    if out_csv.exists():
+        prev = pd.read_csv(out_csv).fillna("")
+        for r in prev.itertuples(index=False):
+            meta.setdefault(str(r.StudyInstanceUID), (str(r.side), str(r.scanner)))
+
     if meta:
-        out_csv = args.out / "study_meta.csv"
         with out_csv.open("w") as fh:
             fh.write("StudyInstanceUID,side,scanner\n")
             for sid, (side, fp) in sorted(meta.items()):
@@ -350,6 +360,11 @@ def main() -> None:
               f"({sides.count('R')} right normalised to left)")
         print(f"scanners: {len(scanners)} distinct fingerprints")
         print(f"wrote {out_csv}")
+        gap = len(studies) - len(meta)
+        if gap > 0:
+            print(f"WARNING: {gap} of {len(studies)} studies have no metadata row. "
+                  f"Those studies cannot be grouped by scanner. Delete {out_csv} and "
+                  f"the .npy files for a clean rebuild if this number is large.")
 
     # Record how this cache was built. The checkpoint stores a copy, and inference
     # compares the two: a cache built with different constants is the failure that

@@ -154,7 +154,7 @@ def normalise_label_table(path: Path) -> pd.DataFrame:
     return df
 
 
-def report_oof(oof: pd.DataFrame, path: Path) -> None:
+def report_oof(oof: pd.DataFrame, path: Path, targets: pd.DataFrame) -> None:
     """Per-label AUC over the pooled out-of-fold predictions, plus the file itself.
 
     Saved because the metric is a macro average: choosing ensemble weights, blending
@@ -163,23 +163,33 @@ def report_oof(oof: pd.DataFrame, path: Path) -> None:
     teacher -- read it for which labels are learnable from these images, and the
     annotated 58 for whether the teacher was right.
     """
-    train = pd.read_csv(data_root() / "train.csv")
-    y = train.set_index(ID_COL).reindex(oof[ID_COL])
+    # Score against the same targets training used. train.csv is NaN for every
+    # study but the 58 annotated ones, so reading targets from there silently
+    # collapsed each column to a single class and printed "--" for all twelve.
+    y = targets.set_index(ID_COL).reindex(oof[ID_COL])
+    for c in LABELS:
+        if c in y:
+            oof[f"{c}__y"] = y[c].values
     oof.to_csv(path, index=False)
 
+    from sklearn.metrics import roc_auc_score
     print(f"\n{'label':<18} {'OOF AUC':>8} {'pos rate':>9}")
     print("-" * 38)
     aucs = []
     for c in LABELS:
-        t = (y[c] > 0.5).astype(int).values if c in y else None
-        if t is None or len(set(t)) < 2:
-            print(f"{c:<18} {'--':>8}"); continue
-        from sklearn.metrics import roc_auc_score
-        a = roc_auc_score(t, oof[c].values)
+        if c not in y:
+            print(f"{c:<18} {'--':>8}   no target column"); continue
+        v = pd.to_numeric(y[c], errors="coerce").values
+        keep = ~np.isnan(v)
+        t = (v[keep] > 0.5).astype(int)
+        if len(set(t)) < 2:
+            print(f"{c:<18} {'--':>8}   {keep.sum()} labelled, one class"); continue
+        a = roc_auc_score(t, oof[c].values[keep])
         aucs.append(a)
         print(f"{c:<18} {a:>8.3f} {t.mean():>9.3f}")
     print("-" * 38)
-    print(f"{'MACRO':<18} {np.mean(aucs):>8.3f}   ({len(oof)} studies)")
+    macro = np.mean(aucs) if aucs else float("nan")
+    print(f"{'MACRO':<18} {macro:>8.3f}   ({len(oof)} studies)")
     print(f"\nwrote {path} -- per-label ensemble weights and blending need this file.")
 
 
@@ -401,7 +411,8 @@ def main() -> None:
         print(f"fold {fold} best OOF macro AUC: {s:.3f}\n")
 
     if oof:
-        report_oof(pd.concat(oof, ignore_index=True), Path(args.out) / "oof.csv")
+        report_oof(pd.concat(oof, ignore_index=True), Path(args.out) / "oof.csv",
+                   derived)
 
     if scores:
         print(f"mean best OOF macro AUC: {np.mean(scores):.3f}")
