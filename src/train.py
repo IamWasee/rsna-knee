@@ -154,6 +154,58 @@ def normalise_label_table(path: Path) -> pd.DataFrame:
     return df
 
 
+def scanner_group(fp: str) -> str:
+    """Coarsen a scanner fingerprint into a machine identity.
+
+    preprocess.py records five raw DICOM fields verbatim, which is the right thing
+    for a record of fact but the wrong key to group on: ImagingFrequency is a
+    per-scan measurement, not a property of the machine. One Siemens Avanto fit
+    showed up as 63.685238, 63.685250, 63.685256 and 63.685264 across four studies.
+    Left raw, the fingerprint split 4,407 studies into 3,220 groups -- and grouping
+    on a near-unique key is exactly the random split it was meant to replace.
+
+    Round the frequency to the nearest MHz. That still separates 1.5T (~64) from 3T
+    (~128), which is a real difference in machine, while collapsing the drift.
+    """
+    parts = str(fp).split("|")
+    if len(parts) < 4:
+        return str(fp)
+    try:
+        parts[3] = str(round(float(parts[3]))) if parts[3].strip() else ""
+    except ValueError:
+        pass
+    return "|".join(parts)
+
+
+def merge_groups(keys: dict[str, str], links: dict[str, str]) -> dict[str, str]:
+    """Union two grouping rules so a study obeys both.
+
+    A study belongs to a scanner AND to a report. Picking one rule and falling back
+    to the other leaves the other leak open: two studies of the same patient scanned
+    on different machines would satisfy scanner-grouping and still straddle a fold.
+    Union-find over both relations puts them in one group instead.
+    """
+    parent: dict[str, str] = {}
+
+    def find(x: str) -> str:
+        parent.setdefault(x, x)
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(a: str, b: str) -> None:
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[ra] = rb
+
+    for sid in keys:
+        union(f"s:{sid}", f"k:{keys[sid]}")
+        if sid in links:
+            union(f"s:{sid}", f"r:{links[sid]}")
+    return {sid: find(f"s:{sid}") for sid in keys}
+
+
 def report_oof(oof: pd.DataFrame, path: Path, targets: pd.DataFrame) -> None:
     """Per-label AUC over the pooled out-of-fold predictions, plus the file itself.
 
@@ -209,18 +261,40 @@ def build_labels(args) -> tuple[pd.DataFrame, pd.DataFrame]:
     # recorded it, and fall back to the report text where it did not.
     meta_path = Path(args.cache) / "study_meta.csv"
     text = train.set_index(ID_COL)["Report"].astype(str)
+    ids = derived[ID_COL].astype(str).tolist()
+    # md5, not hash(). Python randomises string hashing per process, so hash() gave
+    # a different fold split in every run -- including between two arms of the same
+    # ablation, which are separate processes. Two numbers produced that way are not
+    # comparable, and nothing in the log would have said so.
+    import hashlib
+    def _h(t: str) -> str:
+        return hashlib.md5(t.encode("utf-8", "replace")).hexdigest()[:16]
+    links = {i: _h(text[i]) for i in ids if i in text.index}
+
     if meta_path.exists():
         meta = pd.read_csv(meta_path).set_index(ID_COL)
-        scanner = meta["scanner"].astype(str)
-        derived["_group"] = derived[ID_COL].map(
-            lambda i: scanner.get(i) if i in scanner.index and scanner.get(i).strip()
-            else str(hash(text.get(i, i))))
-        n_sc = derived[ID_COL].isin(scanner.index).sum()
-        print(f"  folds grouped by scanner: {derived['_group'].nunique()} groups "
-              f"over {n_sc}/{len(derived)} studies with a fingerprint")
+        raw = meta["scanner"].astype(str).to_dict()
+        keys, no_fp = {}, 0
+        for i in ids:
+            fp = str(raw.get(i, "")).strip()
+            if fp and fp.strip("|"):
+                keys[i] = scanner_group(fp)
+            else:
+                keys[i] = f"unknown:{i}"   # its own group; claims nothing it cannot show
+                no_fp += 1
+        derived["_group"] = derived[ID_COL].astype(str).map(merge_groups(keys, links))
+        n_g = derived["_group"].nunique()
+        print(f"  folds grouped by scanner and report: {n_g} groups over "
+              f"{len(derived)} studies ({no_fp} with no usable fingerprint)")
+        sizes = derived["_group"].value_counts()
+        print(f"  largest groups: {list(sizes.head(5))}, median {int(sizes.median())}")
+        if n_g > 0.5 * len(derived):
+            print(f"  WARNING: {n_g} groups over {len(derived)} studies is close to one "
+                  f"group per study. Grouping this fine does not prevent scanner "
+                  f"memorisation -- the split is effectively random.")
     else:
-        derived["_group"] = derived[ID_COL].map(
-            lambda i: hash(text.get(i, i)) if i in text.index else hash(i))
+        derived["_group"] = derived[ID_COL].astype(str).map(
+            lambda i: links.get(i, f"unknown:{i}"))
         print("  no study_meta.csv in the cache -- folds grouped by report text only, "
               "which does NOT prevent scanner memorisation")
     n_dup = len(derived) - derived["_group"].nunique()
