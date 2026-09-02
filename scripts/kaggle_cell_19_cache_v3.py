@@ -17,64 +17,106 @@
 #      software, imaging frequency, coil). Without this file, folds group only on
 #      report text and the model is free to memorise the site rather than the knee.
 #
-# Attach the competition only. CPU. ~40 min for the full run.
+# A 60-study probe runs first, into its own directory so the real cache stays clean.
+# The probe is CHECKED, not just eyeballed: if right knees are not being made to
+# look like left ones the cell stops before spending 40 minutes building a cache
+# that would quietly train the model on two mirrored anatomies.
+#
+# 4 slots x 9 slices x 288px = 2.99 MB/study, ~13.2 GB.
+#
+# Attach the competition only. CPU, Internet on. ~45 min.
 # ============================================================
 !pip install -q pydicom opencv-python-headless
 
-import sys, glob, json, os, numpy as np
+import sys, glob, json, os
+import numpy as np
+import pandas as pd
+
 CODE = "/kaggle/working/rsna-knee"
 !rm -rf $CODE && git clone -q https://github.com/IamWasee/rsna-knee.git $CODE
 sys.path.insert(0, f"{CODE}/src")
 
 CACHE = "/kaggle/working/cache_v3"
+PROBE = "/kaggle/working/cache_probe"
+ARGS = "--size 288 --crop-mm 140 --anchors 3"
 
-!python $CODE/src/preprocess.py --out $CACHE --limit 40 --workers 4 \
-    --size 288 --crop-mm 140 --anchors 3
+# ---------------------------------------------------------------- probe
+!python $CODE/src/preprocess.py --out $PROBE --limit 60 --workers 4 {ARGS}
 
-man = json.load(open(f"{CACHE}/cache_manifest.json"))
-print("\nmanifest:", man)
-v = np.load(sorted(glob.glob(f"{CACHE}/*.npy"))[0])
-print(f"shape {v.shape}  ->  {v.nbytes/1e6:.2f} MB/study, "
-      f"{v.nbytes*4407/1e9:.1f} GB total")
+man = json.load(open(f"{PROBE}/cache_manifest.json"))
+print("\nmanifest:", json.dumps(man))
+assert man["laterality"] is True, "laterality is off in the manifest"
 
-# Did laterality actually fire? study_meta.csv records the side each study was
-# resolved to and what was done about it. If every row says "L" and none were
-# flipped, the tag lookup silently failed and the run is not worth 40 minutes.
-import pandas as pd
-meta = pd.read_csv(f"{CACHE}/study_meta.csv")
-print("\ncolumns:", list(meta.columns))
-for c in meta.columns:
-    if c != "StudyInstanceUID":
-        print(f"\n{c}:\n{meta[c].value_counts(dropna=False).head(8)}")
+meta = pd.read_csv(f"{PROBE}/study_meta.csv")
+n_r = int((meta["side"].astype(str).str.upper().str[0] == "R").sum())
+n_l = int((meta["side"].astype(str).str.upper().str[0] == "L").sum())
+print(f"\nsides resolved: {n_l} left, {n_r} right, {len(meta) - n_l - n_r} unknown")
+print(f"scanners: {meta['scanner'].nunique()} distinct fingerprints in {len(meta)} studies")
 
-# Left and right knees side by side after normalisation. They should now look like
-# the same anatomy in the same orientation, not mirror images of each other.
+if n_l < 3 or n_r < 3:
+    raise SystemExit(
+        f"only {n_l} left / {n_r} right resolved in 60 studies. Either the side "
+        f"lookup is failing or this sample is one-sided -- either way the check "
+        f"below cannot run, so do not build the full cache yet."
+    )
+
+# ---------------------------------------------------------------- the check
+# If normalisation worked, an average right knee should now resemble an average
+# left knee MORE than its own mirror image does. Coronal slot (index 1), middle
+# slice. This is the whole claim of the change, stated as a number.
+def mean_coronal(uids):
+    v = [np.load(f"{PROBE}/{u}.npy")[1, 4].astype(np.float32) for u in uids
+         if os.path.exists(f"{PROBE}/{u}.npy")]
+    return np.mean(v, axis=0)
+
+def corr(a, b):
+    a, b = a - a.mean(), b - b.mean()
+    return float((a * b).sum() / np.sqrt((a * a).sum() * (b * b).sum()))
+
+side0 = meta["side"].astype(str).str.upper().str[0]
+L = mean_coronal(meta[side0 == "L"]["StudyInstanceUID"])
+R = mean_coronal(meta[side0 == "R"]["StudyInstanceUID"])
+
+aligned = corr(L, R)
+mirrored = corr(L, R[:, ::-1])
+print(f"\nmean left knee vs mean right knee, coronal:")
+print(f"  as normalised : {aligned:+.4f}")
+print(f"  mirrored back : {mirrored:+.4f}")
+if aligned <= mirrored:
+    raise SystemExit(
+        f"laterality normalisation is NOT working: right knees still resemble the "
+        f"mirror of left knees ({mirrored:.4f}) at least as much as left knees "
+        f"themselves ({aligned:.4f}). Building the full cache would train on two "
+        f"mirrored anatomies. Stopping."
+    )
+print(f"  -> right knees now read as left ones (+{aligned - mirrored:.4f}). Proceeding.")
+
+# ---------------------------------------------------------------- eyes on it
 import matplotlib.pyplot as plt
 names = ["Sag-FS", "Cor-FS", "Ax-FS", "Sag-T1"]
-side_col = next((c for c in meta.columns if "side" in c.lower()), None)
-picks = []
-if side_col:
-    for s in ("L", "R"):
-        rows = meta[meta[side_col].astype(str).str.upper().str[0] == s]
-        if len(rows):
-            picks.append((s, rows.iloc[0]["StudyInstanceUID"]))
-if not picks:
-    picks = [("?", os.path.basename(p)[:-4]) for p in sorted(glob.glob(f"{CACHE}/*.npy"))[:2]]
-
-for s, uid in picks:
-    p = f"{CACHE}/{uid}.npy"
-    if not os.path.exists(p):
-        continue
-    a = np.load(p)
+for s in ("L", "R"):
+    uid = meta[side0 == s]["StudyInstanceUID"].iloc[0]
+    a = np.load(f"{PROBE}/{uid}.npy")
     n = a.shape[1]
-    fig, ax = plt.subplots(a.shape[0], n, figsize=(2.0*n, 2.0*a.shape[0]))
+    fig, ax = plt.subplots(a.shape[0], n, figsize=(1.9 * n, 1.9 * a.shape[0]))
     ax = np.atleast_2d(ax)
     for r in range(a.shape[0]):
         for k in range(n):
             ax[r, k].imshow(a[r, k], cmap="gray"); ax[r, k].axis("off")
             ax[r, k].set_title(f"{names[r] if r < 4 else r} {k}", fontsize=7)
-    fig.suptitle(f"original side {s} -- should read as a LEFT knee", fontsize=10)
+    fig.suptitle(f"scanned as a {s} knee -- should read as a LEFT knee", fontsize=11)
     plt.tight_layout(); plt.show()
 
-# Full run -- uncomment once the two knees above look like the same anatomy.
-# !python $CODE/src/preprocess.py --out $CACHE --workers 4 --size 288 --crop-mm 140 --anchors 3
+# ---------------------------------------------------------------- full build
+!rm -rf $PROBE
+!python $CODE/src/preprocess.py --out $CACHE --workers 4 {ARGS}
+
+n = len(glob.glob(f"{CACHE}/*.npy"))
+gb = sum(os.path.getsize(p) for p in glob.glob(f"{CACHE}/*.npy")) / 1e9
+meta = pd.read_csv(f"{CACHE}/study_meta.csv")
+side0 = meta["side"].astype(str).str.upper().str[0]
+print(f"\n{n} studies, {gb:.1f} GB")
+print(f"laterality: {(side0 == 'R').sum()} right normalised to left, "
+      f"{(side0 == 'L').sum()} already left, {len(meta) - (side0.isin(['L','R'])).sum()} unknown")
+print(f"scanners:   {meta['scanner'].nunique()} distinct fingerprints")
+print(meta['scanner'].value_counts().head(10))
