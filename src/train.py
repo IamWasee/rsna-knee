@@ -40,6 +40,63 @@ def _cache_manifest(cache) -> dict:
     return json.loads(p.read_text()) if p.exists() else {}
 
 
+class Backend:
+    """Where training runs, and the three things that differ because of it.
+
+    A TPU is not a graphics card with more memory. Each of its eight chips has
+    about the same working space as the T4 we already use -- the eight are for
+    running eight copies at once, not for fitting one bigger model. So this does
+    NOT lift the memory ceiling that stopped a large encoder; --encoder-chunk is
+    what does that. What a TPU buys is a second, entirely unused weekly allowance.
+
+    Three differences, and they are the whole port:
+      - half precision is bfloat16 under an "xla" autocast, not float16 under
+        "cuda", and needs no gradient scaler because bfloat16 keeps float32's
+        exponent range and cannot underflow the way float16 does;
+      - the optimiser step goes through xm.optimizer_step, which also flushes the
+        queued graph -- calling opt.step() directly silently accumulates work;
+      - .item() and .cpu() force that flush, so reading the loss every step
+        destroys the performance the chip exists for.
+    """
+
+    def __init__(self, want: str = "auto"):
+        self.xm = None
+        if want in ("auto", "tpu"):
+            try:
+                import torch_xla.core.xla_model as xm
+                self.xm, self.kind = xm, "xla"
+                self.device = xm.xla_device()
+                print(f"device: TPU ({xm.xla_real_devices([str(self.device)])[0]})")
+                return
+            except Exception as e:
+                if want == "tpu":
+                    raise SystemExit(
+                        f"--device tpu but torch_xla is unavailable: "
+                        f"{type(e).__name__}: {e}\n"
+                        f"On Kaggle this needs a TPU accelerator, not a GPU one."
+                    )
+        if want in ("auto", "cuda") and torch.cuda.is_available():
+            self.kind, self.device = "cuda", "cuda"
+        else:
+            self.kind, self.device = "cpu", "cpu"
+        print(f"device: {self.kind}")
+
+    def autocast(self):
+        if self.kind == "xla":
+            return torch.autocast("xla", dtype=torch.bfloat16)
+        return torch.autocast("cuda", dtype=torch.float16,
+                              enabled=(self.kind == "cuda"))
+
+    def step(self, opt, scaler, loss):
+        if self.kind == "xla":
+            loss.backward()
+            self.xm.optimizer_step(opt)
+            return
+        scaler.scale(loss).backward()
+        scaler.step(opt)
+        scaler.update()
+
+
 def macro_auc(y_true: np.ndarray, y_pred: np.ndarray) -> tuple[float, dict]:
     from sklearn.metrics import roc_auc_score
 
@@ -375,23 +432,23 @@ def build_labels(args) -> tuple[pd.DataFrame, pd.DataFrame]:
 
 
 @torch.no_grad()
-def evaluate(model, loader, device) -> tuple[np.ndarray, np.ndarray]:
+def evaluate(model, loader, be) -> tuple[np.ndarray, np.ndarray]:
     model.eval()
     P, Y = [], []
     for batch in loader:
         x, y = batch[0], batch[1]
-        with torch.autocast("cuda", dtype=torch.float16, enabled=device == "cuda"):
-            logits = model(x.to(device, non_blocking=True))
+        with be.autocast():
+            logits = model(x.to(be.device, non_blocking=True))
         P.append(torch.sigmoid(logits.float()).cpu().numpy())
         Y.append(y.numpy())
     return np.concatenate(P), np.concatenate(Y)
 
 
 def train_fold(args, tr: pd.DataFrame, va: pd.DataFrame, gold: pd.DataFrame,
-               fold: int, device: str) -> float:
+               fold: int, be) -> float:
     ds_kw = dict(cache=args.cache, slots=args.slots,
                  n_slices=args.n_slices, size=args.size)
-    dl_kw = dict(num_workers=args.workers, pin_memory=(device == "cuda"))
+    dl_kw = dict(num_workers=args.workers, pin_memory=(be.kind == "cuda"))
 
     tr_dl = DataLoader(KneeStudies(tr, train=True, **ds_kw),
                        batch_size=args.batch, shuffle=True, drop_last=True, **dl_kw)
@@ -405,9 +462,9 @@ def train_fold(args, tr: pd.DataFrame, va: pd.DataFrame, gold: pd.DataFrame,
                       groups_per_slot=args.n_slices // 3,
                       unfreeze_last=args.unfreeze_last,
                       grad_checkpoint=args.grad_checkpoint,
-                      encoder_chunk=args.encoder_chunk).to(device)
+                      encoder_chunk=args.encoder_chunk).to(be.device)
     groups = model.param_groups(args.lr, args.lr_backbone)
-    if args.data_parallel and torch.cuda.device_count() > 1:
+    if args.data_parallel and be.kind == "cuda" and torch.cuda.device_count() > 1:
         # Wrap AFTER param_groups: DataParallel hides the real module behind
         # .module, and a checkpoint saved from the wrapper has every key prefixed
         # with "module." and will not load on one GPU.
@@ -426,7 +483,8 @@ def train_fold(args, tr: pd.DataFrame, va: pd.DataFrame, gold: pd.DataFrame,
     sched = torch.optim.lr_scheduler.OneCycleLR(
         opt, max_lr=[g["lr"] for g in opt.param_groups],
         total_steps=args.epochs * len(tr_dl), pct_start=0.1)
-    scaler = torch.amp.GradScaler(enabled=(device == "cuda"))
+    # bfloat16 keeps float32's exponent range, so the TPU path needs no scaler.
+    scaler = torch.amp.GradScaler(enabled=(be.kind == "cuda"))
     criterion = build_loss()
 
     best, best_oof = -1.0, None
@@ -434,17 +492,15 @@ def train_fold(args, tr: pd.DataFrame, va: pd.DataFrame, gold: pd.DataFrame,
         model.train()
         t0, total = time.time(), 0.0
         for i, (x, y, w) in enumerate(tr_dl):
-            x = x.to(device, non_blocking=True)
-            y = y.to(device, non_blocking=True)
-            w = w.to(device, non_blocking=True)
-            with torch.autocast("cuda", dtype=torch.float16, enabled=(device == "cuda")):
+            x = x.to(be.device, non_blocking=True)
+            y = y.to(be.device, non_blocking=True)
+            w = w.to(be.device, non_blocking=True)
+            with be.autocast():
                 # Per-sample, per-label weights: a finding the report states plainly
                 # counts more than one it never mentioned.
                 loss = (criterion(model(x), y) * w).sum() / w.sum().clamp(min=1e-6)
             opt.zero_grad(set_to_none=True)
-            scaler.scale(loss).backward()
-            scaler.step(opt)
-            scaler.update()
+            be.step(opt, scaler, loss)
             sched.step()
             total += loss.item()
             if (i + 1) % 50 == 0:
@@ -455,9 +511,9 @@ def train_fold(args, tr: pd.DataFrame, va: pd.DataFrame, gold: pd.DataFrame,
         # annotated studies instead meant 60 choices against one small set -- the
         # resulting number is a fitted value, not a held-out one, and it is why the
         # reported score moved further than the leaderboard did.
-        vp, vy = evaluate(model, va_dl, device)
+        vp, vy = evaluate(model, va_dl, be)
         val_auc, val_per = macro_auc((vy > 0.5).astype(int), vp)
-        gp, gy = evaluate(model, gold_dl, device)
+        gp, gy = evaluate(model, gold_dl, be)
         gold_auc, gold_per = macro_auc(gy.astype(int), gp)
 
         print(f"  fold{fold} ep{epoch}  loss {total/len(tr_dl):.4f}  "
@@ -505,6 +561,7 @@ def main() -> None:
                          "throughput and effective batch; does NOT make a model "
                          "that fails at batch 1 fit -- each GPU still holds one "
                          "whole study. Use --encoder-chunk for that.")
+    ap.add_argument("--device", default="auto", choices=["auto", "cuda", "tpu", "cpu"])
     ap.add_argument("--grad-checkpoint", action="store_true",
                     help="recompute activations instead of storing them; ~30%% slower "
                          "per step but lets a base-size encoder fit at all")
@@ -527,12 +584,12 @@ def main() -> None:
                     help="logistic steepness; higher is closer to hard 0/1 labels")
     ap.add_argument("--seed", type=int, default=42)
     args = ap.parse_args()
+    be = Backend(args.device)
 
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
     args.out.mkdir(parents=True, exist_ok=True)
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"device: {device}  backbone: {args.backbone}")
+    print(f"backbone: {args.backbone}")
 
     derived, gold = build_labels(args)
 
@@ -546,7 +603,7 @@ def main() -> None:
         if args.only_fold is not None and fold != args.only_fold:
             continue
         s, fold_oof = train_fold(args, derived.iloc[ti], derived.iloc[vi], gold,
-                                 fold, device)
+                                 fold, be)
         scores.append(s)
         oof.append(fold_oof)
         print(f"fold {fold} best OOF macro AUC: {s:.3f}\n")

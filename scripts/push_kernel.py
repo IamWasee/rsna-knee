@@ -41,6 +41,9 @@ def main() -> None:
     ap.add_argument("cell", type=Path)
     ap.add_argument("slug")
     ap.add_argument("--gpu", action="store_true")
+    ap.add_argument("--tpu", action="store_true",
+                    help="TPU accelerator instead of a GPU -- a separate weekly "
+                         "allowance, and torch_xla only exists on this image")
     ap.add_argument("--dataset", action="append", default=[])
     ap.add_argument("--model", action="append", default=[])
     ap.add_argument("--kernel", action="append", default=[],
@@ -99,16 +102,17 @@ def main() -> None:
         "language": "python",
         "kernel_type": "notebook",
         "is_private": True,
-        "enable_gpu": args.gpu,
-        "enable_tpu": False,
+        "enable_gpu": args.gpu and not args.tpu,
+        "enable_tpu": args.tpu,
         "enable_internet": not args.no_internet,
-        "keywords": ["gpu"] if args.gpu else [],
+        "keywords": ["tpu"] if args.tpu else ["gpu"] if args.gpu else [],
         "dataset_sources": args.dataset,
         "kernel_sources": [k if "/" in k else f"{OWNER}/{k}" for k in args.kernel],
         "competition_sources": [] if args.no_competition else [COMP],
         "model_sources": args.model,
-        "docker_image": IMAGE,
-        "machine_shape": "NvidiaTeslaT4" if args.gpu else "None",
+        **({} if args.tpu else {"docker_image": IMAGE}),
+        "machine_shape": ("None" if args.tpu
+                          else "NvidiaTeslaT4" if args.gpu else "None"),
     }
 
     # Syntax-check the driver with the shell magics removed. A cell that does not
