@@ -487,6 +487,46 @@ def train_fold(args, tr: pd.DataFrame, va: pd.DataFrame, gold: pd.DataFrame,
     scaler = torch.amp.GradScaler(enabled=(be.kind == "cuda"))
     criterion = build_loss()
 
+    if args.dry_run:
+        # Rehearsal: the real loop, real data, real precision, for a few steps.
+        # It exists because every hand-written memory probe I built drifted from
+        # what training actually does -- one measured full precision where this
+        # runs half, another fed 36 images per study where the loader packs three
+        # adjacent slices as one image's colour channels and sends 12. Both
+        # produced confident, wrong conclusions, including that a larger encoder
+        # could not fit on this hardware. A rehearsal cannot disagree with
+        # training about any of that, because it IS training.
+        if be.kind == "cuda":
+            torch.cuda.reset_peak_memory_stats()
+        t0 = time.time()
+        model.train()
+        for i, (x, y, w) in enumerate(tr_dl):
+            if i >= args.dry_run:
+                break
+            if i == 0:
+                print(f"  batch tensor {tuple(x.shape)} -> encoder sees "
+                      f"{x.shape[0] * x.shape[1]} images of {x.shape[2]} channels")
+            x = x.to(be.device, non_blocking=True)
+            y = y.to(be.device, non_blocking=True)
+            w = w.to(be.device, non_blocking=True)
+            with be.autocast():
+                loss = (criterion(model(x), y) * w).sum() / w.sum().clamp(min=1e-6)
+            opt.zero_grad(set_to_none=True)
+            be.step(opt, scaler, loss)
+        secs = (time.time() - t0) / max(1, min(args.dry_run, len(tr_dl)))
+        peak = (torch.cuda.max_memory_allocated() / 2**30
+                if be.kind == "cuda" else float("nan"))
+        total_gb = (torch.cuda.get_device_properties(0).total_memory / 2**30
+                    if be.kind == "cuda" else float("nan"))
+        print(f"\nDRY RUN  {args.backbone}")
+        print(f"  batch {args.batch}, chunk {args.encoder_chunk or 'off'}, "
+              f"checkpointing {'on' if args.grad_checkpoint else 'off'}, "
+              f"{'bf16' if be.kind == 'xla' else 'fp16' if be.kind == 'cuda' else 'fp32'}")
+        print(f"  peak memory {peak:.2f} of {total_gb:.1f} GB")
+        print(f"  {secs:.2f} s/step -> {secs * len(tr_dl) / 60:.1f} min/epoch, "
+              f"{secs * len(tr_dl) * args.epochs / 60:.0f} min/fold")
+        return float("nan"), None
+
     best, best_oof = -1.0, None
     for epoch in range(args.epochs):
         model.train()
@@ -561,6 +601,10 @@ def main() -> None:
                          "throughput and effective batch; does NOT make a model "
                          "that fails at batch 1 fit -- each GPU still holds one "
                          "whole study. Use --encoder-chunk for that.")
+    ap.add_argument("--dry-run", type=int, default=0, metavar="STEPS",
+                    help="run STEPS real training steps and report peak memory and "
+                         "speed, then stop. Use this instead of writing a separate "
+                         "memory probe -- a probe drifts from training silently.")
     ap.add_argument("--device", default="auto", choices=["auto", "cuda", "tpu", "cpu"])
     ap.add_argument("--grad-checkpoint", action="store_true",
                     help="recompute activations instead of storing them; ~30%% slower "
