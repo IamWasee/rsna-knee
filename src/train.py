@@ -653,6 +653,15 @@ def main() -> None:
         oof.append(fold_oof)
         print(f"fold {fold} best OOF macro AUC: {s:.3f}\n")
 
+    if args.dry_run:
+        # A rehearsal trains nothing and returns no predictions, so there is
+        # nothing to score or write. Returning early beats concatenating a list
+        # of Nones, which is how the last rehearsal "failed" -- correctly
+        # stopping the run, but for a reason that had nothing to do with the
+        # encoder it was rehearsing.
+        return
+
+    oof = [o for o in oof if o is not None]
     if oof:
         report_oof(pd.concat(oof, ignore_index=True), Path(args.out) / "oof.csv",
                    derived)
