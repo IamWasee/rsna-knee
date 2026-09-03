@@ -462,7 +462,8 @@ def train_fold(args, tr: pd.DataFrame, va: pd.DataFrame, gold: pd.DataFrame,
                       groups_per_slot=args.n_slices // 3,
                       unfreeze_last=args.unfreeze_last,
                       grad_checkpoint=args.grad_checkpoint,
-                      encoder_chunk=args.encoder_chunk).to(be.device)
+                      encoder_chunk=args.encoder_chunk,
+                      img_size=args.size).to(be.device)
     groups = model.param_groups(args.lr, args.lr_backbone)
     if args.data_parallel and be.kind == "cuda" and torch.cuda.device_count() > 1:
         # Wrap AFTER param_groups: DataParallel hides the real module behind

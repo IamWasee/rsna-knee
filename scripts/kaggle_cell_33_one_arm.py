@@ -39,11 +39,24 @@ BB, BATCH, CHUNK, TAG = "__BB__", __BATCH__, __CHUNK__, "__TAG__"
 # a minute and tells us the per-step cost before committing the hour -- and it is
 # the same code path as training, unlike every hand-written probe I wrote this
 # week, each of which drifted from what training actually does.
+# A failing `!python` does NOT stop a notebook cell, and Kaggle reports the
+# kernel COMPLETE regardless. The last run's rehearsal caught a real fatal bug in
+# seconds, then training ran anyway and died the same way -- and the kernel was
+# marked successful. Capture the rehearsal and stop on it.
 print("=" * 64 + "\nREHEARSAL\n" + "=" * 64)
-!python $CODE/src/train.py --cache "$CACHE" --labels "{lab[0]}" \
-    --backbone "$BB" --size 288 --only-fold 0 --batch $BATCH \
-    --encoder-chunk $CHUNK --grad-checkpoint --dry-run 3 \
-    --head slot --pool focal --out /kaggle/working/rehearse 2>&1 | tail -7
+import subprocess
+r = subprocess.run(
+    ["python", f"{CODE}/src/train.py", "--cache", CACHE, "--labels", lab[0],
+     "--backbone", BB, "--size", "288", "--only-fold", "0", "--batch", str(BATCH),
+     "--encoder-chunk", str(CHUNK), "--grad-checkpoint", "--dry-run", "3",
+     "--head", "slot", "--pool", "focal", "--out", "/kaggle/working/rehearse"],
+    capture_output=True, text=True)
+print("\n".join((r.stdout + r.stderr).splitlines()[-12:]))
+if r.returncode != 0:
+    raise SystemExit(
+        f"rehearsal failed (exit {r.returncode}) -- training would fail the same "
+        f"way. Fix it before spending the hour; the error is above."
+    )
 
 print("\n" + "=" * 64 + f"\nTRAINING {TAG}\n" + "=" * 64)
 t0 = time.time()

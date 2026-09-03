@@ -43,7 +43,11 @@ def load_models(weights: Path, device: str) -> tuple[list, dict]:
                       head=cfg.get("head", "shared"), pool=cfg.get("pool", "gap"),
                       n_slot=cfg.get("slots", 4),
                       groups_per_slot=cfg.get("n_slices", 9) // 3,
-                      unfreeze_last=cfg.get("unfreeze_last", 6)).to(device)
+                      unfreeze_last=cfg.get("unfreeze_last", 6),
+                      encoder_chunk=cfg.get("encoder_chunk", 0),
+                      # Must match training, or a resolution-bound position table
+                      # is rebuilt to a different shape and the weights will not load.
+                      img_size=manifest.get("size", cfg.get("size"))).to(device)
         m.load_state_dict(ck["model"])
         m.eval()
         models.append(m)

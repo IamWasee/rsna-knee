@@ -193,7 +193,8 @@ class KneeModel(nn.Module):
                  pretrained: bool = True, dropout: float = 0.3,
                  head: str = "slot", pool: str = "focal", n_slot: int = 4,
                  groups_per_slot: int = 3, unfreeze_last: int = 6,
-                 grad_checkpoint: bool = False, encoder_chunk: int = 0):
+                 grad_checkpoint: bool = False, encoder_chunk: int = 0,
+                 img_size: int | None = None):
         super().__init__()
         from config import LABELS
         labels = labels or LABELS
@@ -211,8 +212,17 @@ class KneeModel(nn.Module):
             # global_pool="" keeps the spatial map that focal pooling needs;
             # num_classes=0 alone would already have collapsed it with the average
             # we are trying to avoid.
-            self.encoder = timm.create_model(backbone, pretrained=pretrained,
-                                             num_classes=0, global_pool="", in_chans=3)
+            # img_size matters for any model carrying a resolution-bound table:
+            # coatnet_rmlp and swin bake a relative-position bias sized to their
+            # training resolution, and at 288 they ask for an 18x18 table and find
+            # the 14x14 one built for 224. timm rebuilds it when told the size.
+            # Models that take no img_size are built without it.
+            kw = dict(pretrained=pretrained, num_classes=0, global_pool="", in_chans=3)
+            try:
+                self.encoder = timm.create_model(backbone, img_size=img_size, **kw) \
+                    if img_size else timm.create_model(backbone, **kw)
+            except TypeError:
+                self.encoder = timm.create_model(backbone, **kw)
             # Every slice of a study goes through the encoder, so one study is
             # n_slot * groups images -- 36 at the current geometry. That multiplier
             # is why a base-size CNN would not fit on a T4 at ANY batch size while
