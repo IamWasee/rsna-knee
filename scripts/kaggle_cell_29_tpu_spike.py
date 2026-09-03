@@ -20,6 +20,16 @@
 #   which also flushes the queued graph; and reading the loss every step forces
 #   that flush, which is why per-step logging can dominate the runtime.
 #
+# ATTEMPT 4, and the last. Attempt 3 reached a real TPU, started training, and
+# ran out of memory at batch 8 -- the log dumped buffers of bf16[96,401,1536],
+# which is 8 studies x 12 images x 401 tokens through DINOv2's MLP. XLA plans
+# memory ahead and keeps more alive at once than PyTorch does, so batch 8 does not
+# transfer. Batch 2 with chunking is a quarter of the peak.
+#
+# If this fails too, TPU is closed. Two hours were budgeted and 2.1 are spent;
+# this runs only because the TPU allowance cannot be used for anything else and
+# the failure mode is now known rather than mysterious.
+#
 # SET THE ACCELERATOR TO TPU, not GPU. Internet on. Target: under 40 minutes.
 # ============================================================
 import sys, os, time
@@ -58,7 +68,7 @@ CACHE = os.path.dirname(v3[0])
 t0 = time.time()
 !python $CODE/src/train.py --cache "$CACHE" --labels "{lab[0]}" \
     --backbone "dinov2:{dino[0]}" --device tpu --size 288 \
-    --only-fold 0 --epochs 2 --batch 8 --workers 2 \
+    --only-fold 0 --epochs 2 --batch 2 --encoder-chunk 6 --workers 2 \
     --lr 1e-3 --lr-backbone 8e-6 --head slot --pool focal \
     --out /kaggle/working/tpu_probe
 mins = (time.time() - t0) / 60
