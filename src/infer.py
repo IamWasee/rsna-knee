@@ -74,8 +74,11 @@ def check_parity(train_manifest: dict, cache: Path) -> None:
     # with no such key was built without it. Left it out of this list and a model
     # trained on unnormalised knees would be served mirrored ones at test time --
     # every pixel moved, the tensor shape unchanged, and nothing in the log.
+    # slot_scheme and only_slot matter as much as the numbers: a model trained on
+    # sagittal slices served coronal ones has the right tensor shape and the wrong
+    # anatomy, which is the same class of silent failure as the laterality flip.
     fields = ["slots", "size", "crop_mm", "n_anchors", "group", "n_slices", "band",
-              "laterality"]
+              "laterality", "slot_scheme", "only_slot"]
     bad = [(f, train_manifest.get(f, False if f == "laterality" else None),
             test.get(f, False if f == "laterality" else None))
            for f in fields

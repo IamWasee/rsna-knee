@@ -283,6 +283,11 @@ def main() -> None:
     ap.add_argument("--out", type=Path, required=True)
     ap.add_argument("--split", default="train", choices=["train", "test"])
     ap.add_argument("--slots", type=int, default=4)
+    ap.add_argument("--only-slot", type=int, metavar="N",
+                    help="build ONE slot (0=Sag-fluid 1=Cor-fluid 2=Axial 3=Sag-T1). "
+                         "Lets a per-plane cache carry many more slices inside the "
+                         "same 20 GB: 4 slots x 24 slices x 288px is 35 GB, one "
+                         "slot x 24 is 8.8 GB.")
     ap.add_argument("--size", type=int, default=256)
     ap.add_argument("--crop-mm", type=float, default=CROP_MM)
     ap.add_argument("--anchors", type=int, default=N_ANCHORS,
@@ -297,6 +302,18 @@ def main() -> None:
 
     root = data_root()
     args.out.mkdir(parents=True, exist_ok=True)
+
+    # One slot means rotating SLOTS so the chosen plane is first, then taking one.
+    # pick_series and load_slot both index off this list, so nothing downstream
+    # needs to know which plane it got -- and the manifest records the choice.
+    global SLOTS
+    if args.only_slot is not None:
+        if not 0 <= args.only_slot < len(SLOTS):
+            raise SystemExit(f"--only-slot must be 0..{len(SLOTS)-1}")
+        SLOTS = [SLOTS[args.only_slot]]
+        args.slots = 1
+        print(f"single slot {args.only_slot}: {SLOTS[0][0]}"
+              f"{' fluid-sensitive' if SLOTS[0][1] else ' T1'}")
 
     series = pd.read_csv(root / f"{args.split}_series.csv")
     groups = series.groupby(ID_COL)
@@ -374,7 +391,8 @@ def main() -> None:
                 "n_anchors": args.anchors, "group": GROUP,
                 "n_slices": args.anchors * GROUP, "band": [0.15, 0.85],
                 "laterality": not args.no_laterality,
-                "slot_scheme": [list(x) for x in SLOTS[:args.slots]], "split": args.split}
+                "slot_scheme": [list(x) for x in SLOTS[:args.slots]],
+                "only_slot": args.only_slot, "split": args.split}
     (args.out / "cache_manifest.json").write_text(json.dumps(manifest, indent=2))
     print("manifest:", json.dumps(manifest))
 
