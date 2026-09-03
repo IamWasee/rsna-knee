@@ -38,7 +38,13 @@ print(f"torch {torch.__version__}, timm {timm.__version__}, "
       f"{torch.cuda.get_device_properties(0).total_memory/2**30:.0f} GB")
 
 SIZE, N_SLOT, GROUPS = 288, 4, 3
-N_IMG = N_SLOT * GROUPS * 3          # 36 slices per study
+# 12, not 36. The loader packs three ADJACENT SLICES as the three colour channels
+# of one image (dataset.py: reshape(slots * (n_slices // GROUP), GROUP, h, w)), so
+# the encoder sees 4 slots x 3 groups = 12 three-channel images per study. Every
+# memory probe I ran before this used 36 -- three times the real load, on top of
+# measuring full precision where training uses half. The claim that a larger
+# encoder "cannot fit" was made at roughly six times the true requirement.
+N_IMG = N_SLOT * GROUPS              # 12 three-channel images per study
 
 # ---------------------------------------------------------------- correctness
 # Same weights, same input, chunked vs not. Run in float32 and in eval mode so
@@ -47,7 +53,7 @@ print("\n" + "=" * 64 + "\n1. CORRECTNESS\n" + "=" * 64)
 torch.manual_seed(0)
 m = KneeModel("resnet18", pretrained=False, head="slot", pool="focal",
               n_slot=N_SLOT, groups_per_slot=GROUPS).cuda().eval()
-x = torch.randn(2, N_IMG, 3, 128, 128, device="cuda")
+x = torch.randn(2, N_IMG, 3, 128, 128, device="cuda")   # (B, 12, 3, H, W)
 with torch.no_grad():
     m.encoder_chunk = 0
     ref = m(x).float()
@@ -107,14 +113,14 @@ def fits(name, chunk, batch):
             return None
         raise
 
-hdr = f"{'encoder':<34}{'family':<22}" + "".join(f"{f'chunk {c}':>11}" for c in (0, 12, 6))
+hdr = f"{'encoder':<34}{'family':<22}" + "".join(f"{f'chunk {c}':>11}" for c in (0, 6, 3))
 print("\n" + hdr); print("-" * len(hdr))
 opened = []
 for name, fam in CANDIDATES:
     if name.split(".")[0] not in known and name not in known:
         print(f"{name:<34}{fam:<22}  not in this timm"); continue
     row, best = "", 0
-    for chunk in (0, 12, 6):
+    for chunk in (0, 6, 3):
         got = None
         for b in (4, 2, 1):
             try:
@@ -130,7 +136,7 @@ for name, fam in CANDIDATES:
     print(f"{name:<34}{fam:<22}{row}")
 
 print("-" * len(hdr))
-print("chunk 0 = all 36 slices at once, which is what we do today.\n")
+print("chunk 0 = all 12 images at once, which is what we do today.\n")
 
 if opened:
     print("Encoders that chunking makes trainable:")
