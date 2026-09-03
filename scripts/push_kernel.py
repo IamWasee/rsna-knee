@@ -48,6 +48,9 @@ def main() -> None:
     ap.add_argument("--no-competition", action="store_true")
     ap.add_argument("--no-internet", action="store_true",
                     help="required for a submission notebook; also rules out git clone")
+    ap.add_argument("--sub", action="append", default=[], metavar="KEY=VALUE",
+                    help="replace __KEY__ in the driver before pushing, so one "
+                         "file can serve several kernels")
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
 
@@ -130,7 +133,16 @@ def main() -> None:
 
     with tempfile.TemporaryDirectory() as d:
         d = Path(d)
-        (d / f"{args.slug}.ipynb").write_text(json.dumps(notebook(args.cell.read_text())))
+        text = args.cell.read_text()
+        for kv in args.sub:
+            k, _, v = kv.partition("=")
+            if f"__{k}__" not in text:
+                raise SystemExit(f"{args.cell.name} has no placeholder __{k}__")
+            text = text.replace(f"__{k}__", v)
+        left = [w for w in text.split("__") if w.isupper() and w.isidentifier()]
+        if left:
+            raise SystemExit(f"unsubstituted placeholder(s): {sorted(set(left))}")
+        (d / f"{args.slug}.ipynb").write_text(json.dumps(notebook(text)))
         (d / "kernel-metadata.json").write_text(json.dumps(meta, indent=2))
         print(json.dumps(meta, indent=2))
         if args.dry_run:

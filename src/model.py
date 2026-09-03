@@ -193,11 +193,12 @@ class KneeModel(nn.Module):
                  pretrained: bool = True, dropout: float = 0.3,
                  head: str = "slot", pool: str = "focal", n_slot: int = 4,
                  groups_per_slot: int = 3, unfreeze_last: int = 6,
-                 grad_checkpoint: bool = False):
+                 grad_checkpoint: bool = False, encoder_chunk: int = 0):
         super().__init__()
         from config import LABELS
         labels = labels or LABELS
         self.n_slot, self.groups = n_slot, groups_per_slot
+        self.encoder_chunk = encoder_chunk
         self.head_kind, self.pool_kind = head, pool
         self.is_vit = backbone.startswith("dinov2:")
 
@@ -238,7 +239,19 @@ class KneeModel(nn.Module):
     def forward(self, x: torch.Tensor, return_attention: bool = False):
         # x: (B, n_slot*groups, 3, H, W)
         b, n = x.shape[:2]
-        fmap = self.encoder(x.flatten(0, 1))
+        flat = x.flatten(0, 1)
+        # One study is n_slot * groups images -- 36 at the usual geometry -- and
+        # they all go through the encoder together, so peak memory scales with the
+        # SLICE count, not the study count. That is why a base-size encoder could
+        # not run here at any batch size. Feeding the slices in chunks caps the
+        # peak at chunk-size images; with checkpointing on, only each chunk's
+        # output is held, so the ceiling drops roughly by the chunk ratio.
+        if self.encoder_chunk and flat.shape[0] > self.encoder_chunk:
+            k = self.encoder_chunk
+            fmap = torch.cat([self.encoder(flat[i:i + k])
+                              for i in range(0, flat.shape[0], k)], dim=0)
+        else:
+            fmap = self.encoder(flat)
         if fmap.ndim == 4:
             feats = self.focal(fmap) if self.focal is not None else fmap.mean((2, 3))
         else:

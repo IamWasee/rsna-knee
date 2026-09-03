@@ -1,30 +1,23 @@
 # ============================================================
-# RSNA Knee — per-plane caches with the whole slice stack
+# RSNA Knee — ONE per-plane cache with the whole slice stack
 #
-# The two biggest levers left in the published evidence both need this cache, and
-# neither is a bigger backbone:
+# Pushed three times, once per plane, because three of these in ONE notebook is
+# what killed the first attempt: 3 x 8.8 GB = 26.4 GB against a 20 GB working
+# limit. Sagittal and coronal both finished; axial died at study 1,600 with the
+# disk full, and a failed notebook saves no output, so all three were lost. I had
+# checked that ONE plane fits and then built three into the same 20 GB.
 #
-#   ALL SLICES.   Dazcona et al. on MRNet, everything else held: all slices
-#                 max-pooled beats fixed sampling by +0.037 macro and +0.087 on
-#                 MENISCUS. The gain lands almost entirely on the small focal
-#                 finding, which is the exact shape of our deficit -- Lateral
-#                 Meniscus 0.710, MCL 0.732. We currently load 9 slices of roughly
-#                 24, so a tear on a skipped slice is invisible and no amount of
-#                 attention recovers it.
+# Why per-plane at all, beyond the disk: the two biggest published levers left
+# both want it. All slices max-pooled beat fixed sampling by +0.037 macro and
+# +0.087 on MENISCUS -- the gain lands on the small focal finding, which is the
+# shape of our deficit. And separate per-plane models combined afterwards beat one
+# shared network fed every plane by +0.076. We load 9 slices of ~24 and run one
+# encoder across four slots: the losing side of both.
 #
-#   LATE FUSION.  Same paper: separate models per plane, combined afterwards,
-#                 scored 0.9340 against 0.8577 for one shared network fed all
-#                 three planes -- +0.076, the largest single number in any of the
-#                 research. Our shared encoder across four slots is the losing
-#                 configuration.
+# 8 anchors x 3 adjacent = 24 slices, covering essentially the whole stack.
+# 1 slot x 24 x 288px = 2.0 MB/study = 8.8 GB. Measured, not estimated.
 #
-# Why per plane rather than one fat cache: 4 slots x 24 slices x 288px is 35 GB
-# against a 20 GB limit. ONE slot x 24 slices is 8.8 GB and fits with room to
-# spare -- and it is what late fusion wants anyway.
-#
-# 8 anchors x 3 adjacent = 24 slices, which covers essentially the whole stack.
-#
-# Attach the competition only. CPU, Internet on. ~2h for all three.
+# Attach the competition only. CPU -- no GPU quota. Internet on. ~45 min.
 # ============================================================
 !pip install -q pydicom opencv-python-headless
 
@@ -35,49 +28,49 @@ CODE = "/kaggle/working/rsna-knee"
 !rm -rf $CODE && git clone -q https://github.com/IamWasee/rsna-knee.git $CODE
 sys.path.insert(0, f"{CODE}/src")
 
-PLANES = [(0, "sag"), (1, "cor"), (2, "ax")]     # Sag-fluid, Cor-fluid, Axial
-ARGS = "--size 288 --crop-mm 140 --anchors 8"    # 8 x 3 = 24 slices
+SLOT, TAG = __SLOT__, "__TAG__"
+OUT = f"/kaggle/working/cache_{TAG}"
+ARGS = "--size 288 --crop-mm 140 --anchors 8"
 
-# Probe one plane on 30 studies before committing two hours. A slot that is often
-# missing would produce mostly-blank volumes, and that is worth knowing now.
-PROBE = "/kaggle/working/probe"
-!python $CODE/src/preprocess.py --out $PROBE --limit 30 --workers 4 --only-slot 0 {ARGS}
-# preprocess.py exiting non-zero does not stop a notebook cell, so an empty probe
-# directory here means the command failed above -- most likely this clone of
-# master predates the flag being used. Say that instead of an IndexError.
-probe_files = sorted(glob.glob(f"{PROBE}/*.npy"))
-if not probe_files:
+!python $CODE/src/preprocess.py --out $OUT --workers 4 --only-slot $SLOT {ARGS}
+
+files = glob.glob(f"{OUT}/*.npy")
+if not files:
     raise SystemExit(
-        "the probe wrote nothing -- read preprocess.py's output above. If it says "
-        "'unrecognized arguments', this notebook cloned a commit of master that "
-        "predates the flag; push src/ first, then re-run."
+        "nothing was written -- read preprocess.py's output above. "
+        "'unrecognized arguments' means this clone of master predates the flag."
     )
-v = np.load(probe_files[0])
-print(f"\nshape {v.shape} -> {v.nbytes/1e6:.2f} MB/study, "
-      f"{v.nbytes*4407/1e9:.1f} GB per plane")
-blank = float((v.reshape(v.shape[0]*v.shape[1], -1).max(1) == 0).mean())
-print(f"blank slices in this study: {blank:.0%}")
-if v.nbytes * 4407 / 1e9 > 18:
-    raise SystemExit("one plane already exceeds the working limit; lower --anchors")
-!rm -rf $PROBE
+gb = sum(os.path.getsize(p) for p in files) / 1e9
+man = json.load(open(f"{OUT}/cache_manifest.json"))
+meta = pd.read_csv(f"{OUT}/study_meta.csv")
+side = meta["side"].astype(str).str.upper().str[0]
+print(f"\n{len(files)} studies, {gb:.1f} GB")
+print(f"manifest: {json.dumps(man)}")
+print(f"laterality: {(side=='R').sum()} right normalised to left, "
+      f"{(side=='L').sum()} already left, {(~side.isin(['L','R'])).sum()} unknown")
+if gb > 18:
+    print(f"WARNING: {gb:.1f} GB is close to the 20 GB working limit.")
 
-for idx, tag in PLANES:
-    out = f"/kaggle/working/cache_{tag}"
-    print("\n" + "=" * 60 + f"\nplane {idx} -> {out}\n" + "=" * 60)
-    !python $CODE/src/preprocess.py --out $out --workers 4 --only-slot {idx} {ARGS}
-    n = len(glob.glob(f"{out}/*.npy"))
-    gb = sum(os.path.getsize(p) for p in glob.glob(f"{out}/*.npy")) / 1e9
-    print(f"{n} studies, {gb:.1f} GB")
+# Does this plane actually carry signal for every study, or is the sequence often
+# missing? A mostly-blank volume trains on nothing and says nothing about it.
+blanks = []
+for f in files[:400]:
+    v = np.load(f)
+    blanks.append(float((v.reshape(-1, v.shape[-1] * v.shape[-2]).max(1) == 0).mean()))
+b = np.array(blanks)
+print(f"\nblank slices over {len(b)} studies: mean {b.mean():.1%}, "
+      f"{(b > 0.5).sum()} studies more than half blank")
+if b.mean() > 0.2:
+    print("This plane is missing for many studies -- weight it accordingly in the blend.")
 
-print("\n" + "=" * 60)
-tot = 0
-for _, tag in PLANES:
-    out = f"/kaggle/working/cache_{tag}"
-    if os.path.exists(f"{out}/cache_manifest.json"):
-        m = json.load(open(f"{out}/cache_manifest.json"))
-        n = len(glob.glob(f"{out}/*.npy"))
-        gb = sum(os.path.getsize(p) for p in glob.glob(f"{out}/*.npy")) / 1e9
-        tot += gb
-        print(f"{tag}: {n} studies, {gb:.1f} GB, slots={m['slots']} "
-              f"n_slices={m['n_slices']} only_slot={m['only_slot']}")
-print(f"total {tot:.1f} GB of a 20 GB working limit")
+import matplotlib.pyplot as plt
+v = np.load(sorted(files)[0])
+n = v.shape[1]; cols = 12; rows = int(np.ceil(n / cols))
+fig, ax = plt.subplots(rows, cols, figsize=(1.5 * cols, 1.6 * rows))
+ax = np.atleast_2d(ax)
+for k in range(rows * cols):
+    a = ax[k // cols, k % cols]; a.axis("off")
+    if k < n:
+        a.imshow(v[0, k], cmap="gray"); a.set_title(f"{k}", fontsize=6)
+fig.suptitle(f"{TAG}: all {n} slices of one study", fontsize=11)
+plt.tight_layout(); plt.show()

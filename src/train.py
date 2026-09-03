@@ -404,13 +404,24 @@ def train_fold(args, tr: pd.DataFrame, va: pd.DataFrame, gold: pd.DataFrame,
                       head=args.head, pool=args.pool, n_slot=args.slots,
                       groups_per_slot=args.n_slices // 3,
                       unfreeze_last=args.unfreeze_last,
-                      grad_checkpoint=args.grad_checkpoint).to(device)
+                      grad_checkpoint=args.grad_checkpoint,
+                      encoder_chunk=args.encoder_chunk).to(device)
+    groups = model.param_groups(args.lr, args.lr_backbone)
+    if args.data_parallel and torch.cuda.device_count() > 1:
+        # Wrap AFTER param_groups: DataParallel hides the real module behind
+        # .module, and a checkpoint saved from the wrapper has every key prefixed
+        # with "module." and will not load on one GPU.
+        print(f"  DataParallel over {torch.cuda.device_count()} GPUs")
+        model = torch.nn.DataParallel(model)
 
     # A pretrained encoder driven at the head's rate forgets what it knew before it
     # learns the task, so the two get separate rates. For a CNN trained from an
     # ImageNet init the gap matters less, but keeping one code path avoids a second
     # definition that has to be kept in step by hand.
-    opt = torch.optim.AdamW(model.param_groups(args.lr, args.lr_backbone),
+    # `groups` was captured before any DataParallel wrap -- the wrapper has no
+    # param_groups method, so calling it here would fail the moment --data-parallel
+    # is used.
+    opt = torch.optim.AdamW(groups,
                             weight_decay=args.weight_decay)
     sched = torch.optim.lr_scheduler.OneCycleLR(
         opt, max_lr=[g["lr"] for g in opt.param_groups],
@@ -459,7 +470,8 @@ def train_fold(args, tr: pd.DataFrame, va: pd.DataFrame, gold: pd.DataFrame,
             best_oof["fold"] = fold
             print("    per-label OOF: " + "  ".join(
                 f"{c.split()[0][:4]} {val_per[c]:.2f}" for c in LABELS))
-            torch.save({"model": model.state_dict(), "fold": fold,
+            core = model.module if isinstance(model, torch.nn.DataParallel) else model
+            torch.save({"model": core.state_dict(), "fold": fold,
                         "oof_auc": val_auc, "gold_auc": gold_auc,
                         "per_label": val_per, "gold_per_label": gold_per,
                         "args": vars(args), "cache_manifest": _cache_manifest(args.cache)},
@@ -484,6 +496,15 @@ def main() -> None:
                     help="encoder learning rate; for a pretrained ViT the public "
                          "baseline uses 8e-6 against a 1e-3 head, a 125x gap")
     ap.add_argument("--weight-decay", type=float, default=1e-2)
+    ap.add_argument("--encoder-chunk", type=int, default=0, metavar="N",
+                    help="push the slices through the encoder N at a time. Peak "
+                         "memory scales with slices per study (36), not batch "
+                         "size, so this is what lets a large encoder run at all.")
+    ap.add_argument("--data-parallel", action="store_true",
+                    help="split the batch across every visible GPU. Raises "
+                         "throughput and effective batch; does NOT make a model "
+                         "that fails at batch 1 fit -- each GPU still holds one "
+                         "whole study. Use --encoder-chunk for that.")
     ap.add_argument("--grad-checkpoint", action="store_true",
                     help="recompute activations instead of storing them; ~30%% slower "
                          "per step but lets a base-size encoder fit at all")
