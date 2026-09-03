@@ -73,9 +73,9 @@ for w in WEIGHTS:
 print(f"\n{len(WEIGHTS)} checkpoints -> {WDIR}")
 for w in sorted(os.listdir(WDIR)):
     print(f"   {w}")
-if len(WEIGHTS) != 10:
-    print(f"WARNING: expected 10 (2 heads x 5 folds), found {len(WEIGHTS)}. "
-          f"The blend that measured 0.797 was ten models; this is not it.")
+print(f"\nrank-averaging {len(WEIGHTS)} checkpoints. Reference points:")
+print("  10 (full-v3, both heads) -> OOF 0.797, leaderboard 0.865")
+print("  5  (one head, 5 folds)   -> OOF 0.789 for slot+focal")
 
 # Preprocess the test set exactly as the training cache was built -- every field
 # from the checkpoint's own manifest, never today's defaults. The mismatch that
