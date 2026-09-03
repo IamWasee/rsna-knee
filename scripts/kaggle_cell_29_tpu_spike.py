@@ -27,24 +27,22 @@ CODE = "/kaggle/working/rsna-knee"
 !rm -rf $CODE && git clone -q https://github.com/IamWasee/rsna-knee.git $CODE
 sys.path.insert(0, f"{CODE}/src")
 
-import torch
-print(f"torch {torch.__version__}")
-try:
-    import torch_xla, torch_xla.core.xla_model as xm
-    d = xm.xla_device()
-    print(f"torch_xla {torch_xla.__version__}")
-    print(f"device {d} -> {xm.xla_real_devices([str(d)])[0]}")
-    print(f"visible cores: {len(xm.get_xla_supported_devices())}")
-except Exception as e:
-    raise SystemExit(
-        f"torch_xla unavailable: {type(e).__name__}: {e}\n"
-        "Set the notebook accelerator to TPU (Settings -> Accelerator), not GPU."
-    )
-
-# Smallest honest test: does a tensor round-trip and does a real backbone train?
-t0 = time.time()
-a = torch.randn(8, 8, device=d)
-print(f"\nmatmul on TPU: {(a @ a).sum().item():.3f}  ({time.time()-t0:.1f}s incl. compile)")
+# Everything that touches the TPU runs in a SUBPROCESS, never in this notebook.
+# A TPU has exactly one owner: importing torch_xla here claims it, and the
+# training process launched afterwards then aborts with a core dump trying to
+# claim it again. That is what killed the first attempt -- not the platform.
+probe = "/kaggle/working/probe_tpu.py"
+open(probe, "w").write("""
+import torch, torch_xla, torch_xla.core.xla_model as xm
+d = xm.xla_device()
+print(f"torch {torch.__version__}, torch_xla {torch_xla.__version__}")
+print(f"device {d} -> {xm.xla_real_devices([str(d)])[0]}")
+print(f"visible cores: {len(xm.get_xla_supported_devices())}")
+a = torch.randn(256, 256, device=d)
+print(f"matmul on TPU: {(a @ a).sum().item():.1f}")
+""")
+!python $probe
+print()
 
 !pip install -q timm transformers
 from kaggle_paths import find, describe

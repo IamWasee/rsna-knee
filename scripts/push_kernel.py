@@ -111,8 +111,10 @@ def main() -> None:
         "competition_sources": [] if args.no_competition else [COMP],
         "model_sources": args.model,
         **({} if args.tpu else {"docker_image": IMAGE}),
-        "machine_shape": ("None" if args.tpu
-                          else "NvidiaTeslaT4" if args.gpu else "None"),
+        # machine_shape is omitted entirely for TPU: sending "None" alongside
+        # enable_tpu produced a plain CPU machine (torch 2.10.0+cpu, no torch_xla).
+        **({} if args.tpu
+           else {"machine_shape": "NvidiaTeslaT4" if args.gpu else "None"}),
     }
 
     # Syntax-check the driver with the shell magics removed. A cell that does not
