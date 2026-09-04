@@ -524,8 +524,27 @@ def train_fold(args, tr: pd.DataFrame, va: pd.DataFrame, gold: pd.DataFrame,
               f"checkpointing {'on' if args.grad_checkpoint else 'off'}, "
               f"{'bf16' if be.kind == 'xla' else 'fp16' if be.kind == 'cuda' else 'fp32'}")
         print(f"  peak memory {peak:.2f} of {total_gb:.1f} GB")
-        print(f"  {secs:.2f} s/step -> {secs * len(tr_dl) / 60:.1f} min/epoch, "
-              f"{secs * len(tr_dl) * args.epochs / 60:.0f} min/fold")
+        per_epoch = secs * len(tr_dl) / 60
+        per_fold = per_epoch * args.epochs
+        n_folds = 1 if args.only_fold is not None else args.folds
+        total_min = per_fold * n_folds
+        print(f"  {secs:.2f} s/step -> {per_epoch:.1f} min/epoch, "
+              f"{per_fold:.0f} min/fold, {total_min/60:.1f} h for {n_folds} fold(s)")
+
+        # The measurement above is only worth taking if something acts on it. The
+        # CoAtNet run projected 454 min/fold here, printed it, and trained anyway
+        # -- 249 minutes against an hour of allowance, which overdrew the week.
+        # A budget makes the projection a decision instead of a line in a log.
+        if args.max_minutes and total_min > args.max_minutes:
+            raise SystemExit(
+                f"\nREFUSED: projected {total_min:.0f} min against a budget of "
+                f"{args.max_minutes} min.\n"
+                f"  {args.backbone} at batch {args.batch} costs {secs:.2f} s/step.\n"
+                f"  Fit it by lowering --epochs, raising --batch, using --only-fold, "
+                f"or raising --max-minutes deliberately."
+            )
+        if args.max_minutes:
+            print(f"  within the {args.max_minutes} min budget.")
         return float("nan"), None
 
     best, best_oof = -1.0, None
@@ -606,6 +625,10 @@ def main() -> None:
                     help="run STEPS real training steps and report peak memory and "
                          "speed, then stop. Use this instead of writing a separate "
                          "memory probe -- a probe drifts from training silently.")
+    ap.add_argument("--max-minutes", type=int, default=0, metavar="MIN",
+                    help="with --dry-run, exit non-zero if the projected run "
+                         "exceeds this. Turns the projection into a gate rather "
+                         "than a number nobody reads.")
     ap.add_argument("--device", default="auto", choices=["auto", "cuda", "tpu", "cpu"])
     ap.add_argument("--grad-checkpoint", action="store_true",
                     help="recompute activations instead of storing them; ~30%% slower "
