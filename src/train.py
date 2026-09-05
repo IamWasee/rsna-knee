@@ -499,11 +499,19 @@ def train_fold(args, tr: pd.DataFrame, va: pd.DataFrame, gold: pd.DataFrame,
         # training about any of that, because it IS training.
         if be.kind == "cuda":
             torch.cuda.reset_peak_memory_stats()
+        # The first steps carry cuDNN autotuning, allocator growth and dataloader
+        # spin-up, and averaging them in inflates the projection badly: CoAtNet
+        # was projected at 454 min/fold from 4 cold steps and actually ran 249.
+        # A gate built on a number 1.8x too high refuses arms that would have fit,
+        # which is what happened to all five in the first bake-off.
+        WARMUP = 3
         t0 = time.time()
         model.train()
         for i, (x, y, w) in enumerate(tr_dl):
-            if i >= args.dry_run:
+            if i >= args.dry_run + WARMUP:
                 break
+            if i == WARMUP:
+                t0 = time.time()          # restart the clock past warm-up
             if i == 0:
                 print(f"  batch tensor {tuple(x.shape)} -> encoder sees "
                       f"{x.shape[0] * x.shape[1]} images of {x.shape[2]} channels")
@@ -514,7 +522,8 @@ def train_fold(args, tr: pd.DataFrame, va: pd.DataFrame, gold: pd.DataFrame,
                 loss = (criterion(model(x), y) * w).sum() / w.sum().clamp(min=1e-6)
             opt.zero_grad(set_to_none=True)
             be.step(opt, scaler, loss)
-        secs = (time.time() - t0) / max(1, min(args.dry_run, len(tr_dl)))
+        timed = max(1, min(args.dry_run, len(tr_dl) - WARMUP))
+        secs = (time.time() - t0) / timed
         peak = (torch.cuda.max_memory_allocated() / 2**30
                 if be.kind == "cuda" else float("nan"))
         total_gb = (torch.cuda.get_device_properties(0).total_memory / 2**30
@@ -528,7 +537,8 @@ def train_fold(args, tr: pd.DataFrame, va: pd.DataFrame, gold: pd.DataFrame,
         per_fold = per_epoch * args.epochs
         n_folds = 1 if args.only_fold is not None else args.folds
         total_min = per_fold * n_folds
-        print(f"  {secs:.2f} s/step -> {per_epoch:.1f} min/epoch, "
+        print(f"  {secs:.2f} s/step (steady, {WARMUP} warm-up steps discarded) "
+              f"-> {per_epoch:.1f} min/epoch, "
               f"{per_fold:.0f} min/fold, {total_min/60:.1f} h for {n_folds} fold(s)")
 
         # The measurement above is only worth taking if something acts on it. The

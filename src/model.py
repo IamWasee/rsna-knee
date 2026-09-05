@@ -236,6 +236,7 @@ class KneeModel(nn.Module):
                     print(f"  {backbone} has no gradient checkpointing ({e}); "
                           f"peak memory will be higher")
         dim = self.encoder.num_features
+        self.n_features = dim
         self.focal = FocalPool() if pool == "focal" else None
         feat = dim * (2 if pool == "focal" else 1)
 
@@ -245,6 +246,18 @@ class KneeModel(nn.Module):
         else:
             self.pool = AttentionPool(feat)   # name kept: old checkpoints load
             self.head = nn.Sequential(nn.Dropout(dropout), nn.Linear(feat, len(labels)))
+
+    def _to_nchw(self, f: torch.Tensor) -> torch.Tensor:
+        """Swin and friends return (N, H, W, C); focal pooling wants (N, C, H, W).
+
+        Left alone this raised "expected input with shape [*, 1536], but got
+        input of size [4, 4, 18]" -- the channel axis had been read as spatial.
+        Decided by which axis carries num_features rather than by model name, so
+        it covers every channels-last encoder rather than the one that failed.
+        """
+        if f.ndim == 4 and f.shape[1] != self.n_features and f.shape[-1] == self.n_features:
+            return f.permute(0, 3, 1, 2).contiguous()
+        return f
 
     def forward(self, x: torch.Tensor, return_attention: bool = False):
         # x: (B, n_slot*groups, 3, H, W)
@@ -258,10 +271,11 @@ class KneeModel(nn.Module):
         # output is held, so the ceiling drops roughly by the chunk ratio.
         if self.encoder_chunk and flat.shape[0] > self.encoder_chunk:
             k = self.encoder_chunk
-            fmap = torch.cat([self.encoder(flat[i:i + k])
+            fmap = torch.cat([self._to_nchw(self.encoder(flat[i:i + k]))
                               for i in range(0, flat.shape[0], k)], dim=0)
         else:
             fmap = self.encoder(flat)
+        fmap = self._to_nchw(fmap)
         if fmap.ndim == 4:
             feats = self.focal(fmap) if self.focal is not None else fmap.mean((2, 3))
         else:

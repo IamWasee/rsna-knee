@@ -41,7 +41,11 @@ if not (v3 and lab and dino):
 CACHE, LABELS_CSV, DINO = os.path.dirname(v3[0]), lab[0], dino[0]
 
 EPOCHS = 8               # matches what CoAtNet got, so the numbers compare
-BUDGET_PER_ARM = 75      # minutes; anything slower is skipped, not squeezed
+# 110 min at fold 0. The first run refused all five at 75, but its projections
+# were inflated by cold-start steps -- CoAtNet was projected at 454 min/fold and
+# ran 249. The rehearsal now discards warm-up steps, so these numbers are steady
+# state and the budget is set against real ones.
+BUDGET_PER_ARM = 110
 ARMS = [
     ("dinov2",    f"dinov2:{DINO}",                    8, 0, "plain ViT (incumbent)"),
     ("swin",      "swin_small_patch4_window7_224",     4, 0, "windowed transformer"),
