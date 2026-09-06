@@ -432,14 +432,48 @@ def build_labels(args) -> tuple[pd.DataFrame, pd.DataFrame]:
 
 
 @torch.no_grad()
-def evaluate(model, loader, be) -> tuple[np.ndarray, np.ndarray]:
+def tta_views(x: torch.Tensor, n: int) -> list:
+    """Identity plus small rotations and zooms -- no flips.
+
+    A horizontal mirror swaps medial for lateral and corrupts four of the twelve
+    targets; a vertical one moves the knee off the orientation it is always
+    acquired in. What is left are transforms the label genuinely does not depend
+    on, which is the only kind worth averaging over.
+    """
+    import torch.nn.functional as F
+    views = [x]
+    for k in range(1, n):
+        ang = (-1) ** k * (3.0 + 2.0 * (k // 2)) * np.pi / 180
+        sc = 1.0 + 0.03 * (k % 2)
+        flat = x.flatten(0, 1)
+        cos, sin = float(np.cos(ang)) / sc, float(np.sin(ang)) / sc
+        th = torch.tensor([[cos, -sin, 0.0], [sin, cos, 0.0]],
+                          device=x.device, dtype=torch.float32)
+        th = th.unsqueeze(0).expand(flat.shape[0], -1, -1)
+        grid = F.affine_grid(th, flat.shape, align_corners=False)
+        views.append(F.grid_sample(flat, grid, mode="bilinear",
+                                   padding_mode="border",
+                                   align_corners=False).view_as(x))
+    return views
+
+
+def evaluate(model, loader, be, tta: int = 1) -> tuple[np.ndarray, np.ndarray]:
+    """Held-out predictions. With tta > 1 the jittered views are averaged.
+
+    Validating with TTA is the point: it has existed in infer.py since August,
+    defaulted to off, and was never measured. Averaging jittered views can blur
+    a correct ranking as easily as sharpen it, and only the held-out number says
+    which.
+    """
     model.eval()
     P, Y = [], []
     for batch in loader:
         x, y = batch[0], batch[1]
+        x = x.to(be.device, non_blocking=True)
         with be.autocast():
-            logits = model(x.to(be.device, non_blocking=True))
-        P.append(torch.sigmoid(logits.float()).cpu().numpy())
+            p = torch.stack([torch.sigmoid(model(v).float())
+                             for v in tta_views(x, tta)]).mean(0)
+        P.append(p.cpu().numpy())
         Y.append(y.numpy())
     return np.concatenate(P), np.concatenate(Y)
 
@@ -486,7 +520,23 @@ def train_fold(args, tr: pd.DataFrame, va: pd.DataFrame, gold: pd.DataFrame,
         total_steps=args.epochs * len(tr_dl), pct_start=0.1)
     # bfloat16 keeps float32's exponent range, so the TPU path needs no scaler.
     scaler = torch.amp.GradScaler(enabled=(be.kind == "cuda"))
-    criterion = build_loss()
+
+    # Class weighting. Positive rates run from 0.07 (Fracture) to 0.60
+    # (Effusion) and every label has been trained at the same weight, which was
+    # item 5 on the original audit and never done. AUC reads only ordering, so
+    # this cannot help by fixing a threshold -- it helps, if at all, by stopping
+    # a rare label's gradient being swamped inside a shared encoder.
+    #
+    # Capped at 5. The uncapped weight for Fracture is ~13, which makes one
+    # label's gradient dominate the other eleven through the shared trunk.
+    pw = None
+    if args.pos_weight:
+        rate = tr[LABELS].mean().values.clip(0.01, 0.99)
+        pw = torch.tensor(((1 - rate) / rate).clip(max=5.0),
+                          dtype=torch.float32, device=be.device)
+        print("  pos_weight: " + "  ".join(
+            f"{c.split()[0][:4]} {w:.1f}" for c, w in zip(LABELS, pw.tolist())))
+    criterion = build_loss(pw)
 
     if args.dry_run:
         # Rehearsal: the real loop, real data, real precision, for a few steps.
@@ -581,7 +631,7 @@ def train_fold(args, tr: pd.DataFrame, va: pd.DataFrame, gold: pd.DataFrame,
         # annotated studies instead meant 60 choices against one small set -- the
         # resulting number is a fitted value, not a held-out one, and it is why the
         # reported score moved further than the leaderboard did.
-        vp, vy = evaluate(model, va_dl, be)
+        vp, vy = evaluate(model, va_dl, be, tta=args.eval_tta)
         val_auc, val_per = macro_auc((vy > 0.5).astype(int), vp)
         gp, gy = evaluate(model, gold_dl, be)
         gold_auc, gold_per = macro_auc(gy.astype(int), gp)
@@ -639,6 +689,12 @@ def main() -> None:
                     help="with --dry-run, exit non-zero if the projected run "
                          "exceeds this. Turns the projection into a gate rather "
                          "than a number nobody reads.")
+    ap.add_argument("--pos-weight", action="store_true",
+                    help="weight each label by its inverse positive rate, capped "
+                         "at 5. Untested -- audit item 5, never run.")
+    ap.add_argument("--eval-tta", type=int, default=1, metavar="N",
+                    help="views to average at validation. Use it to MEASURE "
+                         "whether TTA helps before enabling it at inference.")
     ap.add_argument("--device", default="auto", choices=["auto", "cuda", "tpu", "cpu"])
     ap.add_argument("--grad-checkpoint", action="store_true",
                     help="recompute activations instead of storing them; ~30%% slower "
