@@ -45,9 +45,16 @@ if man.get("n_slices") != 24 or man.get("slots") != 1:
     raise SystemExit(f"expected 1 sequence x 24 slices, got "
                      f"{man.get('slots')} x {man.get('n_slices')} -- wrong cache")
 
-COMMON = ["--cache", CACHE, "--labels", lab[0], "--backbone", f"dinov2:{dino[0]}",
+# __BB__ is "dinov2" for the incumbent, or any timm name to put a second
+# architecture on the data format that is actually winning -- ConvNeXt was
+# measured on the four-sequence cache, never on a plane cache.
+BB = "__BB__"
+BACKBONE = f"dinov2:{dino[0]}" if BB == "dinov2" else BB
+LR_BB = "8e-6" if BB == "dinov2" else "5e-5"
+COMMON = ["--cache", CACHE, "--labels", lab[0], "--backbone", BACKBONE,
           "--size", "288", "--slots", "1", "--n-slices", "24",
           "--only-fold", "0", "--head", "shared", "--pool", "focal"]
+print(f"backbone: {BACKBONE}")
 
 print("\n" + "=" * 64 + "\nREHEARSAL (gated)\n" + "=" * 64)
 !python $CODE/src/train.py {" ".join(COMMON)} --batch 8 --epochs 8 \
@@ -57,8 +64,8 @@ print("\n" + "=" * 64 + "\nREHEARSAL (gated)\n" + "=" * 64)
 print("\n" + "=" * 64 + f"\nTRAINING -- all 24 slices, {TAG}\n" + "=" * 64)
 t0 = time.time()
 !python $CODE/src/train.py {" ".join(COMMON)} --batch 8 --epochs 8 \
-    --grad-checkpoint --lr 1e-3 --lr-backbone 8e-6 --unfreeze-last 6 \
-    --weight-decay 0.02 --out /kaggle/working/allslice_$TAG
+    --grad-checkpoint --lr 1e-3 --lr-backbone $LR_BB --unfreeze-last 6 \
+    --weight-decay 0.02 --out /kaggle/working/allslice___BBTAG__
 print(f"\nelapsed {(time.time()-t0)/60:.0f} min")
 
 print("\n" + "=" * 64)
