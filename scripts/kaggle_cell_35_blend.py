@@ -37,10 +37,14 @@ from sklearn.metrics import roc_auc_score
 paths = {}
 for p in sorted(find(filename="oof.csv")):
     # .../allslice_sag/oof.csv -> "sag"; .../arm_convnext/oof.csv -> "convnext"
-    d = os.path.basename(os.path.dirname(p))
-    tag = d.replace("allslice_", "plane-").replace("arm_", "")
-    if tag not in paths:
-        paths[tag] = p
+    # Include the notebook that produced it. Two runs of the same configuration
+    # write the same directory name -- planes-5fold and planes-16ep both emit
+    # plane_sag -- and keying on the directory alone silently kept whichever was
+    # walked first, dropping the arm we were trying to compare.
+    d = os.path.dirname(p)
+    nb = os.path.basename(os.path.dirname(d))
+    tag = f"{os.path.basename(d)}@{nb}".replace("allslice_", "").replace("arm_", "")
+    paths[tag] = p
 if len(paths) < 2:
     describe(); raise SystemExit(f"found {len(paths)} oof.csv; attach the arms")
 print(f"{len(paths)} arms: {list(paths)}\n")

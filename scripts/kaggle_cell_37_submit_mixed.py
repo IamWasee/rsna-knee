@@ -1,30 +1,32 @@
 # ============================================================
-# RSNA Knee — SUBMISSION for the mixed blend. Internet OFF.
+# RSNA Knee — SUBMISSION, weighted per ARM. Internet OFF.
 #
-# The selected set spans THREE data layouts, which the previous submission cell
-# could not do -- it preprocessed the test set once, from the first checkpoint's
-# manifest, and served every model from it:
+# Seven arms across four data layouts:
+#   plane_sag@planes-5fold    1 seq x 24 slices, sagittal   DINOv2, 8 epochs
+#   plane_sag@planes-16ep     1 seq x 24 slices, sagittal   DINOv2, 16 epochs
+#   plane_cnx_sag@...         1 seq x 24 slices, sagittal   ConvNeXt
+#   plane_cor@planes-5fold    1 seq x 24 slices, coronal
+#   plane_ax@planes-5fold     1 seq x 24 slices, axial
+#   w_slot@full-v3            4 seq x 9 slices             slot head
+#   w_shared@full-v3          4 seq x 9 slices             shared head
 #
-#   plane_sag   1 sequence x 24 slices   (cache_sag)
-#   plane_cor   1 sequence x 24 slices   (cache_cor)
-#   w_slot      4 sequences x 9 slices   (cache_v3)
-#   w_shared    4 sequences x 9 slices   (cache_v3)
+# TWO THINGS THIS CELL MUST GET RIGHT, both of which the previous version did not:
 #
-# So: group the checkpoints by the manifest they were TRAINED with, build one
-# test cache per distinct manifest, run inference per group, and rank-average
-# the groups at the end. infer.py's parity check then guards each group
-# separately -- serving a sagittal-trained model a coronal cache has the right
-# tensor shape and the wrong anatomy, which is the silent class of failure that
-# once scored 0.675.
+# 1. Average per ARM, not per layout. Three arms read the sagittal cache. Grouping
+#    by layout gives them a combined 1/4 of the vote where the measurement that
+#    produced 0.8032 gave them 3/7. Same checkpoints, different submission.
 #
-# Five-fold pooled OOF for this set: 0.7998, against 0.7970 for the two
-# four-sequence heads alone, which scored 0.865. So expect ~0.868: this run is
-# for the CALIBRATION POINT more than the score. Two submissions have put the
-# leaderboard ~0.068 above our pooled number; a third either confirms that or
-# tells me the projections have been wrong.
+# 2. Key arms by directory AND notebook. planes-5fold and planes-16ep both write
+#    "plane_sag"; keying on the directory alone keeps whichever is walked first
+#    and silently drops the other.
 #
-# Attach: competition, abdullahwasee/rsna-knee-src, planes-5fold, full-v3,
-#         metaresearch/dinov2. GPU. INTERNET OFF.
+# Each distinct test cache is built once, however many arms read it.
+#
+# Pooled OOF: 0.8032 for all seven, against 0.7998 for the four-arm set that
+# scored 0.877. Internal gains have run ~4x smaller than leaderboard ones.
+#
+# Attach: competition, abdullahwasee/rsna-knee-src, planes-5fold, planes-16ep,
+#         convnext-sag-5f, full-v3, metaresearch/dinov2. GPU. INTERNET OFF.
 # ============================================================
 import sys, os, time, shutil, glob, json, hashlib
 import numpy as np, pandas as pd
@@ -48,65 +50,61 @@ sys.path.insert(0, SRC)
 print(f"src: {SRC}\nversion: {open(os.path.join(SRC,'SRC_VERSION.txt')).read().strip()}")
 from kaggle_paths import find, describe
 
-WANT = {"plane_sag", "plane_cor", "w_slot", "w_shared"}
-groups = {}          # manifest fingerprint -> {"man":…, "dir":…, "n":…}
-FLAT = "/kaggle/working/groups"
 import torch
+arms, layouts = {}, {}
 for p in sorted(find(suffix=".pt")):
-    arm = os.path.basename(os.path.dirname(p))
-    if arm not in WANT:
-        continue
+    d = os.path.dirname(p)
+    arm = f"{os.path.basename(d)}@{os.path.basename(os.path.dirname(d))}"
     ck = torch.load(p, map_location="cpu", weights_only=False)
     man = ck.get("cache_manifest", {})
     key = hashlib.md5(json.dumps(
         {k: man.get(k) for k in ("slots", "size", "crop_mm", "n_anchors",
                                  "n_slices", "laterality", "only_slot")},
         sort_keys=True).encode()).hexdigest()[:8]
-    g = groups.setdefault(key, {"man": man, "dir": f"{FLAT}/{key}", "arms": set()})
-    os.makedirs(g["dir"], exist_ok=True)
-    # fold0.pt exists in every arm -- keep the arm in the name or they overwrite
-    shutil.copy(p, f"{g['dir']}/{arm}_{os.path.basename(p)}")
-    g["arms"].add(arm)
+    a = arms.setdefault(arm, {"layout": key, "dir": f"/kaggle/working/arms/{arm}"})
+    if a["layout"] != key:
+        raise SystemExit(f"{arm} mixes checkpoints from two different caches")
+    layouts.setdefault(key, man)
+    os.makedirs(a["dir"], exist_ok=True)
+    shutil.copy(p, f"{a['dir']}/{os.path.basename(p)}")
 
-if not groups:
-    describe(); raise SystemExit(f"no checkpoints from {sorted(WANT)} found")
-missing = WANT - set().union(*(g["arms"] for g in groups.values()))
-if missing:
-    print(f"WARNING: {sorted(missing)} not attached. The 0.7998 set is incomplete; "
-          f"this submits whatever is present.")
-
-print(f"\n{len(groups)} distinct layout(s):")
-for key, g in groups.items():
-    m = g["man"]
-    print(f"  {key}: {sorted(g['arms'])} -- {m.get('slots')} seq x "
-          f"{m.get('n_slices')} slices @ {m.get('size')}px, "
-          f"only_slot={m.get('only_slot')}, {len(os.listdir(g['dir']))} checkpoints")
+if not arms:
+    describe(); raise SystemExit("no checkpoints found -- attach the training notebooks")
+print(f"\n{len(arms)} arm(s) over {len(layouts)} layout(s):")
+for arm, a in sorted(arms.items()):
+    m = layouts[a["layout"]]
+    print(f"  {arm:<32} layout {a['layout']}  "
+          f"{m.get('slots')}x{m.get('n_slices')} @ {m.get('size')}px "
+          f"slot={m.get('only_slot')}  {len(os.listdir(a['dir']))} folds")
 
 t0 = time.time()
-subs = []
-for key, g in groups.items():
-    m = g["man"]
+for key, m in layouts.items():
     cache = f"/kaggle/working/test_{key}"
     lat = "" if m.get("laterality", False) else "--no-laterality"
     slot = f"--only-slot {m['only_slot']}" if m.get("only_slot") is not None else ""
-    print("\n" + "=" * 66 + f"\nlayout {key}: preprocess + infer\n" + "=" * 66, flush=True)
+    print("\n" + "=" * 66 + f"\nlayout {key}: preprocess\n" + "=" * 66, flush=True)
     !python $SRC/preprocess.py --out $cache --split test --workers 4 \
         --slots {m.get('slots',4)} --size {m.get('size',288)} \
         --crop-mm {m.get('crop_mm',140.0)} --anchors {m.get('n_anchors',3)} {slot} {lat}
-    # Intermediates go in a subdirectory. Left at the top level, Kaggle's submit
-    # dialog offered sub_<layout>.csv instead of submission.csv -- which is one
-    # layout's models, not the blend, and would have scored the wrong thing.
-    os.makedirs("/kaggle/working/parts", exist_ok=True)
-    out = f"/kaggle/working/parts/sub_{key}.csv"
-    !python $SRC/infer.py --cache $cache --weights {g['dir']} --out $out
+    print(f"elapsed {(time.time()-t0)/60:.1f} min", flush=True)
+
+# Intermediates live in a subdirectory: left at the top level, Kaggle's submit
+# dialog offered one of them instead of submission.csv, which is a single arm.
+os.makedirs("/kaggle/working/parts", exist_ok=True)
+subs = []
+for arm, a in sorted(arms.items()):
+    cache = f"/kaggle/working/test_{a['layout']}"
+    wdir = a["dir"]
+    out = f"/kaggle/working/parts/{arm.replace('@','_')}.csv"
+    print("\n" + "-" * 66 + f"\n{arm}: infer\n" + "-" * 66, flush=True)
+    !python $SRC/infer.py --cache $cache --weights $wdir --out $out
     if not os.path.exists(out):
-        raise SystemExit(f"layout {key} produced no submission -- see above")
+        raise SystemExit(f"{arm} produced no predictions -- see the error above")
     subs.append(out)
     print(f"elapsed {(time.time()-t0)/60:.1f} min", flush=True)
 
-# Rank-average ACROSS layouts. Within a layout infer.py already rank-averaged its
-# folds; here the groups are combined the same way, per label, because a
-# sagittal model and a four-sequence model are not calibrated to each other.
+# Rank-average across ARMS, equally -- the weighting the 0.8032 measurement used.
+# infer.py already rank-averaged the folds inside each arm.
 from config import ID_COL, LABELS
 frames = [pd.read_csv(s) for s in subs]
 base = frames[0][[ID_COL]].copy()
@@ -120,12 +118,13 @@ for c in LABELS:
 base.to_csv("/kaggle/working/submission.csv", index=False)
 top = [f for f in os.listdir("/kaggle/working") if f.endswith(".csv")]
 assert top == ["submission.csv"], f"expected only submission.csv at top level, got {top}"
-print(f"\nsubmission: {base.shape[0]} rows x {base.shape[1]} cols "
-      f"from {len(frames)} layout(s)")
 assert base[LABELS].notna().all().all(), "NaNs in the submission"
 assert base[ID_COL].is_unique, "duplicate study ids"
 assert base.shape[1] == 13, f"expected 13 columns, got {base.shape[1]}"
+print(f"\nsubmission: {base.shape[0]} rows x {base.shape[1]} cols "
+      f"from {len(frames)} arm(s)")
 print(base.head(3).to_string())
 print(f"\ntotal {(time.time()-t0)/60:.1f} min")
-print("\nPooled OOF for this set: 0.7998. The two four-sequence heads alone were")
-print("0.7970 and scored 0.865. Write down the DIFFERENCE, not the score.")
+print("\nPooled OOF for all seven arms: 0.8032; the four-arm set was 0.7998 and")
+print("scored 0.877. Internal gains have run ~4x smaller than leaderboard ones,")
+print("so +0.0034 here has been worth nearer +0.013 there. Record the gap.")
