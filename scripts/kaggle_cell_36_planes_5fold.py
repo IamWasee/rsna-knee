@@ -66,7 +66,7 @@ COMMON = ["--labels", lab[0], "--backbone", BACKBONE, "--size", "288",
           "--slots", "1", "--n-slices", "24", "--folds", "5",
           "--head", "shared", "--pool", "focal", "--batch", "8", "--epochs", EPOCHS,
           "--lr", "1e-3", "--lr-backbone", LR_BB, "--unfreeze-last", "6",
-          "--weight-decay", "0.02"]
+          "--weight-decay", "0.02"] + [a for a in "__EXTRA__".split() if a]
 
 t0 = time.time()
 for tag, cache in caches.items():

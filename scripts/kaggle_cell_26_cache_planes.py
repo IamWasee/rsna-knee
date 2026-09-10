@@ -29,8 +29,8 @@ CODE = "/kaggle/working/rsna-knee"
 sys.path.insert(0, f"{CODE}/src")
 
 SLOT, TAG = __SLOT__, "__TAG__"
-OUT = f"/kaggle/working/cache_{TAG}"
-ARGS = "--size 288 --crop-mm 140 --anchors 8"
+OUT = f"/kaggle/working/cache_{TAG}"   # __SIZE__px
+ARGS = "--size __SIZE__ --crop-mm 140 --anchors 8"
 
 !python $CODE/src/preprocess.py --out $OUT --workers 4 --only-slot $SLOT {ARGS}
 
