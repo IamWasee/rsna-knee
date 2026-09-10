@@ -457,6 +457,7 @@ def tta_views(x: torch.Tensor, n: int) -> list:
     return views
 
 
+@torch.no_grad()
 def evaluate(model, loader, be, tta: int = 1) -> tuple[np.ndarray, np.ndarray]:
     """Held-out predictions. With tta > 1 the jittered views are averaged.
 
