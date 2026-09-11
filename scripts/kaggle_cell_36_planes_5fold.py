@@ -62,7 +62,13 @@ for tag, c in caches.items():
 BB = "__BB__"
 BACKBONE = f"dinov2:{dino[0]}" if BB == "dinov2" else BB
 LR_BB = "8e-6" if BB == "dinov2" else "5e-5"
-COMMON = ["--labels", lab[0], "--backbone", BACKBONE, "--size", "288",
+# Read the resolution from the cache rather than assuming 288. The manifest
+# check below already refuses a wrong-shaped cache, but it fired at the first
+# batch of a five-fold run instead of before it: the cell asked for 288 against
+# a 336 cache and the dataset raised a shape mismatch per study.
+SIZE = str(json.load(open(f"{list(caches.values())[0]}/cache_manifest.json"))["size"])
+print(f"resolution from the cache manifest: {SIZE}px")
+COMMON = ["--labels", lab[0], "--backbone", BACKBONE, "--size", SIZE,
           "--slots", "1", "--n-slices", "24", "--folds", "5",
           "--head", "shared", "--pool", "focal", "--batch", "8", "--epochs", EPOCHS,
           "--lr", "1e-3", "--lr-backbone", LR_BB, "--unfreeze-last", "6",
