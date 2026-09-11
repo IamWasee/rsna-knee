@@ -186,7 +186,8 @@ def crop_resize(arr: np.ndarray, spacing: float, size: int, crop_mm: float) -> n
 
 def load_slot(series_dir: Path, size: int, crop_mm: float,
               n_anchors: int = N_ANCHORS, plane: str = "",
-              normalise_side: bool = True) -> tuple[np.ndarray, str | None, str]:
+              normalise_side: bool = True,
+              band: tuple = (0.15, 0.85)) -> tuple[np.ndarray, str | None, str]:
     """n_anchors anchors across the joint, GROUP adjacent slices at each.
 
     Returns the volume, the detected side, and the scanner fingerprint.
@@ -221,10 +222,12 @@ def load_slot(series_dir: Path, size: int, crop_mm: float,
     if normalise_side and side == "R" and plane == "Sagittal":
         files = files[::-1]
 
-    # Anchors spread across the central 70%: the outer slices of a knee series are
-    # mostly soft tissue and air, but the menisci sit peripherally, so the window
-    # stays wide rather than hugging the middle.
-    lo, hi = int(len(files) * 0.15), int(np.ceil(len(files) * 0.85))
+    # How much of the stack to sample across. The default was the central 70%,
+    # chosen in August on the reasoning that outer slices are mostly soft tissue
+    # and air. A public single-model checkpoint scoring 0.936 samples 0.06-0.94
+    # with 64-96 slices, against our 24 across 0.15-0.85 -- so that reasoning was
+    # discarding the outer 30% of every knee, and the menisci are peripheral.
+    lo, hi = int(len(files) * band[0]), int(np.ceil(len(files) * band[1]))
     core = files[lo:hi] or files
     lo_a, hi_a = GROUP // 2, len(core) - 1 - GROUP // 2
     if n_anchors == 1:
@@ -252,7 +255,7 @@ def load_slot(series_dir: Path, size: int, crop_mm: float,
 
 def process_study(args: tuple) -> tuple[str, bool, str]:
     (study_id, series_ids, root, split, out_dir, size, crop_mm, n_slots, n_anchors,
-     planes, normalise_side) = args
+     planes, normalise_side, band) = args
     dest = Path(out_dir) / f"{study_id}.npy"
     if dest.exists():
         return study_id, True, "cached"
@@ -264,7 +267,7 @@ def process_study(args: tuple) -> tuple[str, bool, str]:
             v, side, fp = load_slot(Path(root) / f"{split}_series" / study_id / sid,
                                     size, crop_mm, n_anchors,
                                     plane=planes.get(sid, ""),
-                                    normalise_side=normalise_side)
+                                    normalise_side=normalise_side, band=band)
             vol[i] = v
             if side:
                 sides.append(side)
@@ -294,6 +297,10 @@ def main() -> None:
                     help="anchor groups per slot; slices per slot is anchors x 3. "
                          "One group at 336px matches the public solutions and costs "
                          "less storage than three at 256px.")
+    ap.add_argument("--band", type=float, nargs=2, default=[0.15, 0.85],
+                    metavar=("LO", "HI"),
+                    help="fraction of the slice stack to sample across. The 0.936 "
+                         "public single model uses 0.06 0.94.")
     ap.add_argument("--workers", type=int, default=4)
     ap.add_argument("--no-laterality", action="store_true",
                     help="skip presenting every knee as a left one")
@@ -332,7 +339,7 @@ def main() -> None:
 
     jobs = [(s, pick_series(groups.get_group(s), args.slots), str(root), args.split,
              str(args.out), args.size, args.crop_mm, args.slots, args.anchors,
-             planes, not args.no_laterality)
+             planes, not args.no_laterality, tuple(args.band))
             for s in studies]
 
     done = failed = 0
@@ -389,7 +396,7 @@ def main() -> None:
     import json
     manifest = {"slots": args.slots, "size": args.size, "crop_mm": args.crop_mm,
                 "n_anchors": args.anchors, "group": GROUP,
-                "n_slices": args.anchors * GROUP, "band": [0.15, 0.85],
+                "n_slices": args.anchors * GROUP, "band": list(args.band),
                 "laterality": not args.no_laterality,
                 "slot_scheme": [list(x) for x in SLOTS[:args.slots]],
                 "only_slot": args.only_slot, "split": args.split}

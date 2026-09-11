@@ -30,7 +30,12 @@ sys.path.insert(0, f"{CODE}/src")
 
 SLOT, TAG = __SLOT__, "__TAG__"
 OUT = f"/kaggle/working/cache_{TAG}"   # __SIZE__px
-ARGS = "--size __SIZE__ --crop-mm 140 --anchors 8"
+# 21 anchors x 3 adjacent = 63 slices across __BAND__ of the stack, at __SIZE__px.
+# We have been taking 24 slices across the central 70%, discarding the outer 30%
+# of every knee -- where the menisci are. The public single model at 0.936 takes
+# 64-96 slices across 0.06-0.94, and 224px is demonstrably enough for 0.934.
+# 1 x 63 x 224px = 3.2 MB a study, 13.9 GB, against a 20 GB working limit.
+ARGS = "--size __SIZE__ --crop-mm 140 --anchors __ANCHORS__ --band __BAND__"
 
 !python $CODE/src/preprocess.py --out $OUT --workers 4 --only-slot $SLOT {ARGS}
 
