@@ -108,7 +108,7 @@ def macro_auc(y_true: np.ndarray, y_pred: np.ndarray) -> tuple[float, dict]:
     return (float(np.mean(valid)) if valid else float("nan")), per
 
 
-def sharpen(df: pd.DataFrame, k: float = 8.0) -> pd.DataFrame:
+def sharpen(df: pd.DataFrame, k: float = 8.0, to: str = "gold") -> pd.DataFrame:
     """Spread report-derived labels across [0,1] without changing their ranking.
 
     The ensemble averages a coarse source (three discrete values) with a continuous
@@ -127,10 +127,27 @@ def sharpen(df: pd.DataFrame, k: float = 8.0) -> pd.DataFrame:
     cannot hurt AUC; it makes the positive rate plausible rather than arbitrary.
     """
     out = df.copy()
+    rates = {}
     for c in LABELS:
         r = df[c].rank(pct=True)
-        p = GOLD_PREVALENCE[c]
+        if to == "none":
+            out[c] = df[c].clip(0.02, 0.98)
+            rates[c] = float((df[c] > 0.5).mean())
+            continue
+        if to == "gold":
+            p = GOLD_PREVALENCE[c]
+        else:
+            # The extractor's own positive mass. The gold 58 are NOT a prevalence
+            # sample -- every one of them has at least one positive finding, mean
+            # 4.14 of twelve -- so centring on gold prevalence promotes marginal
+            # studies into the positive set. For Fracture that is ~31% against a
+            # corpus rate nearer 7%, and the promoted studies are exactly the ones
+            # the annotators graded negative under "on the fence = negative".
+            p = float(np.clip((df[c] > 0.5).mean(), 0.02, 0.95))
+        rates[c] = p
         out[c] = (1 / (1 + np.exp(-k * (r - (1 - p))))).clip(0.02, 0.98)
+    print("  sharpen target rates: " + "  ".join(
+        f"{c.split()[0][:4]} {rates[c]:.2f}" for c in LABELS))
     return out
 
 
@@ -423,7 +440,7 @@ def build_labels(args) -> tuple[pd.DataFrame, pd.DataFrame]:
 
     if args.sharpen:
         before = derived[LABELS].std().mean()
-        derived = sharpen(derived, args.sharpen_k)
+        derived = sharpen(derived, args.sharpen_k, args.sharpen_to)
         after = derived[LABELS].std().mean()
         print(f"sharpened labels: mean std {before:.3f} -> {after:.3f}")
 
@@ -715,6 +732,10 @@ def main() -> None:
     ap.add_argument("--no-pretrained", dest="pretrained", action="store_false")
     ap.add_argument("--no-sharpen", dest="sharpen", action="store_false",
                     help="train on raw ensemble scores (compressed toward 0.5)")
+    ap.add_argument("--sharpen-to", default="gold", choices=["gold", "source", "none"],
+                    help="which positive rate to centre each label on. 'gold' uses "
+                         "the 58 annotated studies, which are NOT a prevalence "
+                         "sample; 'source' uses the label table's own rate.")
     ap.add_argument("--sharpen-k", type=float, default=8.0,
                     help="logistic steepness; higher is closer to hard 0/1 labels")
     ap.add_argument("--seed", type=int, default=42)
