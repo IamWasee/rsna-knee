@@ -54,9 +54,14 @@ if missing:
 
 for tag, c in caches.items():
     man = json.load(open(f"{c}/cache_manifest.json"))
-    if man.get("slots") != 1 or man.get("n_slices") != 24:
-        raise SystemExit(f"cache_{tag} is {man.get('slots')}x{man.get('n_slices')}, "
-                         f"expected 1x24 -- wrong cache attached")
+    # One sequence is the requirement; the slice count is whatever the cache holds.
+    # Pinning it to 24 refused cache_wide (1x63), which is the point of that cache.
+    if man.get("slots") != 1:
+        raise SystemExit(f"cache_{tag} has {man.get('slots')} sequences, expected 1 "
+                         f"-- this cell trains per-plane specialists")
+    if man.get("n_slices") % 3:
+        raise SystemExit(f"cache_{tag} has {man.get('n_slices')} slices, not a "
+                         f"multiple of 3 -- they are packed as RGB triplets")
     print(f"{tag}: {c}  slot {man.get('only_slot')}  {len(glob.glob(c+'/*.npy'))} studies")
 
 BB = "__BB__"
@@ -66,10 +71,11 @@ LR_BB = "8e-6" if BB == "dinov2" else "5e-5"
 # check below already refuses a wrong-shaped cache, but it fired at the first
 # batch of a five-fold run instead of before it: the cell asked for 288 against
 # a 336 cache and the dataset raised a shape mismatch per study.
-SIZE = str(json.load(open(f"{list(caches.values())[0]}/cache_manifest.json"))["size"])
-print(f"resolution from the cache manifest: {SIZE}px")
+_m = json.load(open(f"{list(caches.values())[0]}/cache_manifest.json"))
+SIZE, NSL = str(_m["size"]), str(_m["n_slices"])
+print(f"from the cache manifest: {SIZE}px, {NSL} slices, band {_m.get('band')}")
 COMMON = ["--labels", lab[0], "--backbone", BACKBONE, "--size", SIZE,
-          "--slots", "1", "--n-slices", "24", "--folds", "5",
+          "--slots", "1", "--n-slices", NSL, "--folds", "5",
           "--head", "shared", "--pool", "focal", "--batch", "8", "--epochs", EPOCHS,
           "--lr", "1e-3", "--lr-backbone", LR_BB, "--unfreeze-last", "6",
           "--weight-decay", "0.02"] + [a for a in "__EXTRA__".split() if a]
