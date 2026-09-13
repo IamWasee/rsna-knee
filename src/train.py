@@ -365,6 +365,24 @@ def build_labels(args) -> tuple[pd.DataFrame, pd.DataFrame]:
             print(f"  borrowed {c!r} from {Path(path).name} "
                   f"({have.sum()}/{len(derived)} studies)")
 
+    # Tri-state masking. A report that never mentions a finding is not saying it is
+    # absent -- radiologists report by exception. Those cells arrive near 0.5 from
+    # the extractor, and training on them teaches the model to call a visibly
+    # arthritic patella normal. Zero weight means no gradient at all, which is
+    # different from a soft target and different from a class weight.
+    if args.mask_unaddressed > 0:
+        band = args.mask_unaddressed
+        for c in LABELS:
+            col = f"{c}__conf"
+            silent = (derived[c] - 0.5).abs() < band
+            if col not in derived.columns:
+                derived[col] = 1.0
+            derived.loc[silent, col] = 0.0
+        share = float(np.mean([(((derived[c] - 0.5).abs() < band).mean())
+                               for c in LABELS]))
+        print(f"  masked {share:.1%} of label cells as unaddressed "
+              f"(|target-0.5| < {band})")
+
     derived = derived[~derived[ID_COL].isin(gold[ID_COL])]
 
     # Fold grouping. Two sources of leakage, and the scanner is the larger one:
@@ -723,7 +741,8 @@ def main() -> None:
     ap.add_argument("--slots", type=int, default=4)
     ap.add_argument("--n-slices", type=int, default=9)
     ap.add_argument("--size", type=int, default=256)
-    ap.add_argument("--head", default="slot", choices=["slot", "slotpos", "shared"],
+    ap.add_argument("--head", default="slot",
+                    choices=["slot", "slotpos", "shared", "topk"],
                     help="slot: one attention query per diagnosis over sequence types; "
                          "shared: a single attention for all twelve labels")
     ap.add_argument("--pool", default="focal", choices=["focal", "gap"],
@@ -732,6 +751,10 @@ def main() -> None:
     ap.add_argument("--no-pretrained", dest="pretrained", action="store_false")
     ap.add_argument("--no-sharpen", dest="sharpen", action="store_false",
                     help="train on raw ensemble scores (compressed toward 0.5)")
+    ap.add_argument("--mask-unaddressed", type=float, default=0.0, metavar="BAND",
+                    help="zero the loss weight where |target-0.5| < BAND, i.e. where "
+                         "the report never addressed the finding. Radiologists "
+                         "report by exception; a silent cell is not a negative.")
     ap.add_argument("--sharpen-to", default="gold", choices=["gold", "source", "none"],
                     help="which positive rate to centre each label on. 'gold' uses "
                          "the 58 annotated studies, which are NOT a prevalence "

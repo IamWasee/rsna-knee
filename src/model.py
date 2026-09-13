@@ -173,6 +173,35 @@ class SlotHead(nn.Module):
         return logits, att
 
 
+class TopKPool(nn.Module):
+    """Max and top-k mean over the slice groups, instead of attention over them.
+
+    Finding a tear is existential -- does ANY slice show a disrupted fascicle --
+    and gated attention spreads weight across all of them. With 21 slice groups a
+    lesion on two of them is diluted tenfold before the head sees it. MRNet pools
+    slices with a max for exactly this reason; our worst labels are Fracture and
+    Lateral Meniscus, both focal, both present on one or two slices.
+
+    Keeps the mean as well: diffuse findings (effusion, osteoarthritis) are spread
+    across the stack and a pure max throws away everything but one slice.
+    """
+
+    def __init__(self, dim: int, k: int = 3):
+        super().__init__()
+        self.k = k
+        self.out_dim = dim * 3
+
+    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        # x: (B, tokens, dim)
+        k = min(self.k, x.shape[1])
+        top = x.topk(k, dim=1).values
+        pooled = torch.cat([x.mean(1), top[:, 0], top.mean(1)], dim=1)
+        # Attention weights for the caller are the top-1 position, one-hot.
+        attn = torch.zeros(x.shape[:2], device=x.device)
+        attn.scatter_(1, x.mean(-1).argmax(1, keepdim=True), 1.0)
+        return pooled, attn
+
+
 class AttentionPool(nn.Module):
     """Gated attention shared across labels (Ilse et al.). The previous head, kept
     so the two can be compared rather than swapped on faith."""
@@ -244,8 +273,14 @@ class KneeModel(nn.Module):
             self.head = SlotHead(feat, n_slot, labels,
                                  n_group=groups_per_slot if head == "slotpos" else 1)
         else:
-            self.pool = AttentionPool(feat)   # name kept: old checkpoints load
-            self.head = nn.Sequential(nn.Dropout(dropout), nn.Linear(feat, len(labels)))
+            if head == "topk":
+                self.pool = TopKPool(feat)
+                self.head = nn.Sequential(nn.Dropout(dropout),
+                                          nn.Linear(self.pool.out_dim, len(labels)))
+            else:
+                self.pool = AttentionPool(feat)   # name kept: old checkpoints load
+                self.head = nn.Sequential(nn.Dropout(dropout),
+                                          nn.Linear(feat, len(labels)))
 
     def _to_nchw(self, f: torch.Tensor) -> torch.Tensor:
         """Swin and friends return (N, H, W, C); focal pooling wants (N, C, H, W).
