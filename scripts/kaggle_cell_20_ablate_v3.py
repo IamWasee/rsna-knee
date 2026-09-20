@@ -56,7 +56,7 @@ print(f"meta:   {'present' if os.path.exists(meta) else 'MISSING -- folds will n
 print(f"labels: {LABELS}")
 
 COMMON = (f'--cache "{CACHE}" --labels "{LABELS}" --backbone "{DINO}" '
-          f'--size 288 --epochs 12 --batch 8 --only-fold 0 '
+          f'--size 288 --sharpen-to gold --epochs 12 --batch 8 --only-fold 0 '
           f'--lr 1e-3 --lr-backbone 8e-6 --unfreeze-last 6 --weight-decay 0.02')
 
 # Arm 1 -- control. Identical model to the 0.814 run; only the cache and the fold

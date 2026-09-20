@@ -68,7 +68,7 @@ viable = []
 for tag, bb, batch, chunk, fam in ARMS:
     code, out = run(["--backbone", bb, "--batch", str(batch),
                      "--encoder-chunk", str(chunk), "--grad-checkpoint",
-                     "--epochs", str(EPOCHS), "--dry-run", "4",
+                     "--sharpen-to", "gold", "--epochs", str(EPOCHS), "--dry-run", "4",
                      "--max-minutes", str(BUDGET_PER_ARM),
                      "--out", "/kaggle/working/rehearse"], capture=True)
     line = next((l.strip() for l in out.splitlines() if "s/step" in l), "")
@@ -90,7 +90,7 @@ t0 = time.time()
 for tag, bb, batch, chunk, fam in viable:
     print("\n" + "-" * 72 + f"\n{tag}: {fam}\n" + "-" * 72, flush=True)
     run(["--backbone", bb, "--batch", str(batch), "--encoder-chunk", str(chunk),
-         "--grad-checkpoint", "--epochs", str(EPOCHS),
+         "--grad-checkpoint", "--sharpen-to", "gold", "--epochs", str(EPOCHS),
          "--lr", "1e-3", "--lr-backbone", "5e-5", "--weight-decay", "0.02",
          "--out", f"/kaggle/working/arm_{tag}"])
     print(f"elapsed {(time.time()-t0)/60:.0f} min", flush=True)

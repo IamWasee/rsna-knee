@@ -59,7 +59,7 @@ print(f"cache:    {CACHE}\nlabels:   {lab[0]}\nfracture: {frac[0]}")
 t0 = time.time()
 !python $CODE/src/train.py --cache "$CACHE" --labels "{lab[0]}" \
     --borrow "{frac[0]}:Fracture" \
-    --backbone "dinov2:{dino[0]}" --size 288 --folds 5 --epochs 10 --batch 8 \
+    --backbone "dinov2:{dino[0]}" --size 288 --sharpen-to gold --folds 5 --epochs 10 --batch 8 \
     --lr 1e-3 --lr-backbone 8e-6 --unfreeze-last 6 --weight-decay 0.02 \
     --head slotpos --pool focal --out /kaggle/working/w_slotpos
 print(f"\nelapsed {(time.time()-t0)/3600:.2f} h")

@@ -53,7 +53,8 @@ BACKBONE = f"dinov2:{dino[0]}" if BB == "dinov2" else BB
 LR_BB = "8e-6" if BB == "dinov2" else "5e-5"
 COMMON = ["--cache", CACHE, "--labels", lab[0], "--backbone", BACKBONE,
           "--size", "288", "--slots", "1", "--n-slices", "24",
-          "--only-fold", "0", "--head", "shared", "--pool", "focal"]
+          "--only-fold", "0", "--head", "shared", "--pool", "focal",
+          "--sharpen-to", "gold"]
 print(f"backbone: {BACKBONE}")
 
 print("\n" + "=" * 64 + "\nREHEARSAL (gated)\n" + "=" * 64)

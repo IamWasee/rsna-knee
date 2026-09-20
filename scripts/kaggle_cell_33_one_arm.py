@@ -61,7 +61,7 @@ if r.returncode != 0:
 print("\n" + "=" * 64 + f"\nTRAINING {TAG}\n" + "=" * 64)
 t0 = time.time()
 !python $CODE/src/train.py --cache "$CACHE" --labels "{lab[0]}" \
-    --backbone "$BB" --size 288 --only-fold 0 --epochs 8 --batch $BATCH \
+    --backbone "$BB" --size 288 --sharpen-to gold --only-fold 0 --epochs 8 --batch $BATCH \
     --encoder-chunk $CHUNK --grad-checkpoint \
     --lr 1e-3 --lr-backbone 5e-5 --weight-decay 0.02 \
     --head slot --pool focal --out /kaggle/working/arm_$TAG

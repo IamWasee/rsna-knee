@@ -296,6 +296,13 @@ def target_fingerprint(y: pd.DataFrame) -> str:
     binarisation, so that is the thing that has to be equal.
     """
     import hashlib
+    # Sort first. oof rows arrive in fold-concatenation order, so hashing them as
+    # they come makes the stamp a function of the SPLIT as well as the targets --
+    # two arms with identical labels and different folds would look like they
+    # disagreed. That is a false alarm on exactly the comparison the stamp exists
+    # to protect, and it was caught by review rather than by the test I wrote,
+    # because the test sorted the frame before handing it over.
+    y = y.sort_index()
     h = hashlib.md5()
     for c in LABELS:
         if c in y:
@@ -738,6 +745,11 @@ def main() -> None:
     ap.add_argument("--backbone", default="resnet34")
     ap.add_argument("--folds", type=int, default=5)
     ap.add_argument("--only-fold", type=int, help="train a single fold (9h runtime limits)")
+    ap.add_argument("--fold-grouping", default="grouped", choices=["grouped", "random"],
+                    help="grouped: scanner and duplicate-report groups stay inside one "
+                         "fold, which is the honest split. random: ignore them. The gap "
+                         "between the two is how much of the score is scanner "
+                         "memorisation rather than knee reading.")
     ap.add_argument("--epochs", type=int, default=6)
     ap.add_argument("--batch", type=int, default=4)
     ap.add_argument("--lr", type=float, default=3e-4, help="head learning rate")
@@ -809,17 +821,36 @@ def main() -> None:
 
     derived, gold = build_labels(args)
 
-    # Plain KFold: the labels are soft, so there is nothing discrete to stratify on,
-    # and studies are independent (one exam each, no patient-level leakage to guard).
-    from sklearn.model_selection import GroupKFold
-    kf = GroupKFold(args.folds)
+    # Two ways to cut the folds, and the difference between them IS the leakage.
+    # Grouped is what we train on: scanner and duplicate-report groups never
+    # straddle a boundary, so a model cannot score by recognising the site.
+    # Random ignores the groups entirely. Both measure the same model on the same
+    # studies with the same targets, so whatever random gains over grouped is the
+    # size of the shortcut -- it is not a better number, it is a dishonest one.
+    from sklearn.model_selection import GroupKFold, KFold
+    if args.fold_grouping == "random":
+        kf = KFold(args.folds, shuffle=True, random_state=args.seed)
+        splits = kf.split(derived)
+        print(f"\nFOLDS: random, seed {args.seed}. Scanner groups are IGNORED -- this "
+              f"number is a leakage probe, never a model score.")
+    else:
+        kf = GroupKFold(args.folds)
+        splits = kf.split(derived, groups=derived["_group"])
+        print(f"\nFOLDS: grouped by scanner and report "
+              f"({derived['_group'].nunique()} groups).")
 
     scores, oof = [], []
-    for fold, (ti, vi) in enumerate(kf.split(derived, groups=derived["_group"])):
+    for fold, (ti, vi) in enumerate(splits):
         if args.only_fold is not None and fold != args.only_fold:
             continue
         s, fold_oof = train_fold(args, derived.iloc[ti], derived.iloc[vi], gold,
                                  fold, be)
+        if args.dry_run:
+            # The projection is per-fold and every fold costs the same, so the
+            # other four rehearsals measure nothing and print over the one that
+            # mattered -- the cell only tails the last.
+            print("rehearsal done (one fold measured; the rest cost the same)")
+            return
         scores.append(s)
         oof.append(fold_oof)
         print(f"fold {fold} best OOF macro AUC: {s:.3f}\n")

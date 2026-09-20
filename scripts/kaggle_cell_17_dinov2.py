@@ -55,7 +55,7 @@ print(f"backbone: {DINO}")
 # behaviour, and the learning rates follow the public baseline's split: the head is
 # new and trains fast, the encoder is only being adapted and trains 125x slower.
 !python $CODE/src/train.py --cache "$CACHE" --labels "$LABELS" \
-    --backbone "$DINO" --epochs 12 --batch 8 \
+    --backbone "$DINO" --sharpen-to gold --epochs 12 --batch 8 \
     --lr 1e-3 --lr-backbone 8e-6 --unfreeze-last 6 --weight-decay 0.02 \
     --head shared --pool gap \
     --out /kaggle/working/weights_dino

@@ -155,7 +155,7 @@ for name, batch in picked:
     tag = name.split(".")[0].replace("_", "-")[:24]
     print("\n" + "=" * 66 + f"\n{name}  (batch {batch}, chunk {CHUNK})\n" + "=" * 66)
     !python $CODE/src/train.py --cache "$CACHE" --labels "{lab[0]}" \
-        --backbone "{name}" --size 288 --only-fold 0 --epochs 10 --batch {batch} \
+        --backbone "{name}" --size 288 --sharpen-to gold --only-fold 0 --epochs 10 --batch {batch} \
         --lr 1e-3 --lr-backbone 5e-5 --weight-decay 0.02 \
         --grad-checkpoint --encoder-chunk {CHUNK} \
         --head slot --pool focal --out /kaggle/working/enc_{tag}

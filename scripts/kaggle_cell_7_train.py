@@ -113,7 +113,7 @@ LABELS = LABELS_CSV
 # Sharpening also stays on for this run despite reducing spread (0.349 -> 0.312) on
 # this label table -- turning it off is a second variable and gets its own run.
 !python $CODE/src/train.py --cache "$CACHE" --labels "$LABELS" \
-    --epochs 12 --batch 8 --backbone resnet34 \
+    --sharpen-to gold --epochs 12 --batch 8 --backbone resnet34 \
     --head shared --pool gap \
     --out /kaggle/working/weights_v2
 

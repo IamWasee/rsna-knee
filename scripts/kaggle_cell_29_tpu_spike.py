@@ -68,7 +68,7 @@ CACHE = os.path.dirname(v3[0])
 t0 = time.time()
 !python $CODE/src/train.py --cache "$CACHE" --labels "{lab[0]}" \
     --backbone "dinov2:{dino[0]}" --device tpu --size 288 \
-    --only-fold 0 --epochs 2 --batch 2 --encoder-chunk 6 --workers 2 \
+    --sharpen-to gold --only-fold 0 --epochs 2 --batch 2 --encoder-chunk 6 --workers 2 \
     --lr 1e-3 --lr-backbone 8e-6 --head slot --pool focal \
     --out /kaggle/working/tpu_probe
 mins = (time.time() - t0) / 60

@@ -54,7 +54,7 @@ assert os.path.exists(f"{CACHE}/study_meta.csv"), "no study_meta.csv -- folds wo
 print(f"cache: {CACHE}\nlabels: {lab[0]}")
 
 COMMON = (f'--cache "{CACHE}" --labels "{lab[0]}" --backbone "dinov2:{dino[0]}" '
-          f'--size 288 --folds 5 --epochs 12 --batch 8 '
+          f'--size 288 --folds 5 --sharpen-to gold --epochs 12 --batch 8 '
           f'--lr 1e-3 --lr-backbone 8e-6 --unfreeze-last 6 --weight-decay 0.02')
 
 t0 = time.time()

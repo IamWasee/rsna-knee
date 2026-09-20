@@ -76,7 +76,7 @@ SIZE, NSL = str(_m["size"]), str(_m["n_slices"])
 print(f"from the cache manifest: {SIZE}px, {NSL} slices, band {_m.get('band')}")
 COMMON = ["--labels", lab[0], "--backbone", BACKBONE, "--size", SIZE,
           "--slots", "1", "--n-slices", NSL, "--folds", "5",
-          "--head", "shared", "--pool", "focal", "--batch", "8", "--epochs", EPOCHS,
+          "--head", "shared", "--pool", "focal", "--batch", "8", "--sharpen-to", "source", "--epochs", EPOCHS,
           "--lr", "1e-3", "--lr-backbone", LR_BB, "--unfreeze-last", "6",
           "--weight-decay", "0.02"] + [a for a in "__EXTRA__".split() if a]
 
