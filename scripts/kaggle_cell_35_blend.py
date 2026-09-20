@@ -61,6 +61,20 @@ print(f"{len(common)} studies scored by all arms "
 if len(common) < 0.9 * max(len(f) for f in frames.values()):
     print("WARNING: arms disagree on which studies they scored -- check the folds")
 
+# Which targets was each arm TRAINED on? Scoring below pins one yardstick (the
+# first arm's), which makes the comparison fair -- but an arm trained against a
+# different --sharpen-to is being read on a ruler it never saw, and that shows up
+# as a deficit that belongs to the config, not the model. The same predictions
+# score 0.804 on source-sharpened targets and 0.780 on gold-sharpened ones.
+stamps = {t: (f["__targets"].iloc[0] if "__targets" in f else "unstamped")
+          for t, f in frames.items()}
+if len(set(stamps.values())) > 1:
+    print("\n*** ARMS TRAINED ON DIFFERENT TARGETS -- read the deltas with care ***")
+    for t, v in sorted(stamps.items(), key=lambda kv: kv[1]):
+        print(f"      {v}  {t}")
+    print("*** all arms below are scored on ONE yardstick, but they did not all\n"
+          "*** train on it; an arm off the common stamp is handicapped, not worse\n")
+
 Y = {c: pd.to_numeric(base[f"{c}__y"], errors="coerce").values for c in LABELS}
 R = {}
 for t, f in frames.items():

@@ -288,6 +288,23 @@ def merge_groups(keys: dict[str, str], links: dict[str, str]) -> dict[str, str]:
     return {sid: find(f"s:{sid}") for sid in keys}
 
 
+def target_fingerprint(y: pd.DataFrame) -> str:
+    """Identity of a target set: the binarised labels these predictions were scored on.
+
+    Two runs are only comparable if this matches. It is deliberately computed from
+    the binarised values rather than the soft ones -- AUC only ever sees the
+    binarisation, so that is the thing that has to be equal.
+    """
+    import hashlib
+    h = hashlib.md5()
+    for c in LABELS:
+        if c in y:
+            v = pd.to_numeric(y[c], errors="coerce").values
+            h.update(c.encode())
+            h.update(np.where(np.isnan(v), 2, (v > 0.5).astype(int)).astype(np.int8).tobytes())
+    return h.hexdigest()[:12]
+
+
 def report_oof(oof: pd.DataFrame, path: Path, targets: pd.DataFrame) -> None:
     """Per-label AUC over the pooled out-of-fold predictions, plus the file itself.
 
@@ -304,6 +321,16 @@ def report_oof(oof: pd.DataFrame, path: Path, targets: pd.DataFrame) -> None:
     for c in LABELS:
         if c in y:
             oof[f"{c}__y"] = y[c].values
+
+    # Stamp WHICH targets these are. Three times now a run has been compared
+    # against a run trained on a different --sharpen-to, and the difference in
+    # the yardstick (0.804 source vs 0.780 gold for the SAME predictions) was
+    # read as a difference in the model. Sharpening is monotone, so it cannot
+    # change a single AUC on a fixed target -- it only moves which studies count
+    # as positive. The fingerprint travels with the predictions so that any
+    # cross-arm comparison can refuse to average two different yardsticks.
+    oof.attrs["target_fingerprint"] = target_fingerprint(y)
+    oof["__targets"] = oof.attrs["target_fingerprint"]
     oof.to_csv(path, index=False)
 
     from sklearn.metrics import roc_auc_score
@@ -457,6 +484,16 @@ def build_labels(args) -> tuple[pd.DataFrame, pd.DataFrame]:
                 )
 
     if args.sharpen:
+        # No default. --sharpen-to decides which studies count as positive, so
+        # omitting it silently re-targets the whole run: sag-topk and sag-masked
+        # left it out, fell back to "gold", and came back unreadable against a
+        # baseline trained on "source". Six GPU hours for two numbers that could
+        # not be compared to anything. Refuse at second one instead.
+        if args.sharpen_to is None:
+            raise SystemExit(
+                "--sharpen-to is required (gold|source|none). It sets the positive "
+                "rate every label is centred on, so runs that disagree on it are "
+                "not comparable. Pass --no-sharpen to train on raw scores.")
         before = derived[LABELS].std().mean()
         derived = sharpen(derived, args.sharpen_k, args.sharpen_to)
         after = derived[LABELS].std().mean()
@@ -755,7 +792,7 @@ def main() -> None:
                     help="zero the loss weight where |target-0.5| < BAND, i.e. where "
                          "the report never addressed the finding. Radiologists "
                          "report by exception; a silent cell is not a negative.")
-    ap.add_argument("--sharpen-to", default="gold", choices=["gold", "source", "none"],
+    ap.add_argument("--sharpen-to", default=None, choices=["gold", "source", "none"],
                     help="which positive rate to centre each label on. 'gold' uses "
                          "the 58 annotated studies, which are NOT a prevalence "
                          "sample; 'source' uses the label table's own rate.")
