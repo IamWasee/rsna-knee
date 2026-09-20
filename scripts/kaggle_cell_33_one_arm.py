@@ -49,6 +49,7 @@ r = subprocess.run(
     ["python", f"{CODE}/src/train.py", "--cache", CACHE, "--labels", lab[0],
      "--backbone", BB, "--size", "288", "--only-fold", "0", "--batch", str(BATCH),
      "--encoder-chunk", str(CHUNK), "--grad-checkpoint", "--dry-run", "3",
+     "--sharpen-to", "gold",
      "--head", "slot", "--pool", "focal", "--out", "/kaggle/working/rehearse"],
     capture_output=True, text=True)
 print("\n".join((r.stdout + r.stderr).splitlines()[-12:]))

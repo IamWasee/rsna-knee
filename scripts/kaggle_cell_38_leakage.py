@@ -94,7 +94,8 @@ def run(extra, label):
     rehearsal below is only a gate if a failure actually stops the cell.
     """
     print("\n" + "=" * 70 + f"\n{label}\n" + "=" * 70, flush=True)
-    r = subprocess.run([sys.executable, f"{CODE}/src/train.py"] + COMMON + extra)
+    r = subprocess.run([sys.executable, "-u", f"{CODE}/src/train.py"]
+                       + COMMON + extra)
     if r.returncode != 0:
         raise SystemExit(f"{label} exited {r.returncode} -- stopping before the "
                          f"next arm burns a session on a broken run")
@@ -104,8 +105,9 @@ t0 = time.time()
 # returns rather than repeating the identical projection five times.
 # 130 min/arm, not 260: the gate has to be tight enough that a 2x regression
 # trips it here rather than killing the session halfway through arm two.
-run(["--fold-grouping", "grouped", "--dry-run", "4", "--max-minutes", "130",
-     "--out", "/kaggle/working/rehearse"], "rehearsal")
+for arm in ["grouped", "random"]:
+    run(["--fold-grouping", arm, "--dry-run", "4", "--max-minutes", "130",
+         "--out", "/kaggle/working/rehearse"], f"rehearsal, {arm} split")
 
 for arm in ["grouped", "random"]:
     run(["--fold-grouping", arm, "--out", f"/kaggle/working/leak_{arm}"],
@@ -164,47 +166,112 @@ def table(norm):
         rows.append((c, t.mean(), a["grouped"], a["random"]))
     return rows, np.mean(tot["grouped"]), np.mean(tot["random"])
 
-rows, g_raw, r_raw = table(norm=False)
-_, g, r = table(norm=True)
+rows_raw, g_raw, r_raw = table(norm=False)
+rows_rk, g, r = table(norm=True)
+
+# Per-fold macro. Nothing is ever compared across a fold boundary here, so this
+# is the only one of the three free of cross-fold contamination -- the pooled
+# number carries score offsets between the five fold models, and rank-normalising
+# only trades those for a prevalence distortion, because grouped folds genuinely
+# differ in per-fold positive rate and uniform ranks assert that they do not.
+#
+# It is also the NOISIEST of the three: it throws away every cross-fold pair,
+# about four fifths of them, so its standard error is roughly 2.2x the pooled
+# one. Hence the printed standard error -- the threshold has to be checked, not
+# asserted.
+#
+# One label set for all ten (arm, fold) cells. Scoring each cell over whatever
+# labels happen to be two-class there lets the two arms average over different
+# labels, and the labels are nowhere near interchangeable (Baker's 0.88 against
+# Lateral Meniscus 0.74). np.nanmean over ten labels and over twelve print
+# identically, so that failure would be silent and worth ~0.01 per dropped
+# label-fold -- half the effect we are trying to see.
+usable, dropped = [], []
+for c in LABELS:
+    ok = True
+    for arm, d in D.items():
+        for _, sub in d.groupby("fold"):
+            y = pd.to_numeric(sub[c + "__y"], errors="coerce").values
+            k = ~np.isnan(y)
+            if k.sum() == 0 or len(set((y[k] > 0.5))) < 2:
+                ok = False
+    (usable if ok else dropped).append(c)
+if dropped:
+    print(f"\nEXCLUDED from the per-fold macro (single-class in some fold): {dropped}")
+print(f"per-fold macro over {len(usable)} of {len(LABELS)} labels")
+
+per = {}
+for arm, d in D.items():
+    v = []
+    for _, sub in d.groupby("fold"):
+        a = []
+        for c in usable:
+            y = pd.to_numeric(sub[c + "__y"], errors="coerce").values
+            k = ~np.isnan(y)          # same masking as the pooled path
+            a.append(auc((y[k] > 0.5).astype(int), sub[c].values[k]))
+        v.append(np.mean(a))
+    per[arm] = v
+if len(per["grouped"]) != len(per["random"]):
+    raise SystemExit(f"fold counts differ ({len(per['grouped'])} vs "
+                     f"{len(per['random'])}) -- a fold produced no oof")
+pg, pr = np.mean(per["grouped"]), np.mean(per["random"])
+se = {a: np.std(v, ddof=1) / np.sqrt(len(v)) for a, v in per.items()}
+se_d = np.hypot(se["grouped"], se["random"])
 
 print(f"\n{'label':<20}{'pos':>7}{'grouped':>10}{'random':>10}{'delta':>9}")
 print("-" * 56)
-for c, pos, a, b in rows:
+for c, pos, a, b in rows_rk:          # the fold-ranked rows, not the raw pooled ones
     print(f"{c:<20}{pos:>6.1%} {a:>9.4f}{b:>10.4f}{b-a:>+9.4f}")
 print("-" * 56)
 print(f"{'MACRO pooled':<20}{'':>7}{g_raw:>9.4f}{r_raw:>10.4f}{r_raw-g_raw:>+9.4f}")
 print(f"{'MACRO fold-ranked':<20}{'':>7}{g:>9.4f}{r:>10.4f}{r-g:>+9.4f}")
+print(f"{'MACRO per-fold':<20}{'':>7}{pg:>9.4f}{pr:>10.4f}{pr-pg:>+9.4f}")
 
-# Per-fold macro, pooled nowhere. No cross-fold calibration artifact at all.
-print(f"\n{'':<20}{'grouped':>10}{'random':>10}")
-per = {}
-for arm, d in D.items():
-    v = []
-    for f_, sub in d.groupby("fold"):
-        a = [auc((pd.to_numeric(sub[c + "__y"], errors="coerce").values > 0.5).astype(int),
-                 sub[c].values)
-             for c in LABELS
-             if len(set((pd.to_numeric(sub[c + "__y"], errors="coerce").values > 0.5))) > 1]
-        v.append(np.nanmean(a))
-    per[arm] = v
+# The five folds behind that mean. NOT paired: grouped fold 2 and random fold 2
+# hold different studies, so subtracting a row means nothing.
+print(f"\nthe five folds behind the per-fold macro (unpaired -- different studies)")
+print(f"{'':<20}{'grouped':>10}{'random':>10}")
 for i in range(len(per["grouped"])):
     print(f"{'  fold ' + str(i):<20}{per['grouped'][i]:>10.4f}{per['random'][i]:>10.4f}")
-pg, pr = np.mean(per["grouped"]), np.mean(per["random"])
-print(f"{'  MEAN of folds':<20}{pg:>10.4f}{pr:>10.4f}{pr-pg:>+9.4f}")
+print(f"{'  mean':<20}{pg:>10.4f}{pr:>10.4f}")
+print(f"{'  std err':<20}{se['grouped']:>10.4f}{se['random']:>10.4f}")
+
+# The teacher's own error, which neither fold scheme touches. train.py already
+# saved it into every checkpoint; the cell used to tell the reader to go hunting
+# for it in scrollback that may not survive.
+print("\ngold AUC (the 58 radiologist-labelled studies), read from the checkpoints")
+import torch
+for arm in ["grouped", "random"]:
+    gs = []
+    for f_ in sorted(glob.glob(f"/kaggle/working/leak_{arm}/fold*.pt")):
+        ck = torch.load(f_, map_location="cpu", weights_only=False)
+        if ck.get("gold_auc") is not None and ck["gold_auc"] == ck["gold_auc"]:
+            gs.append(float(ck["gold_auc"]))
+    print(f"  {arm:<10}{np.mean(gs):.4f} over {len(gs)} folds" if gs
+          else f"  {arm:<10}no gold_auc in the checkpoints")
 
 print(f"\ntotal {(time.time()-t0)/3600:.1f} h")
 print("\nHow to read this")
 print("-" * 70)
-print(f"  Trust the fold-ranked and the mean-of-folds deltas over the pooled one.")
-print(f"  fold-ranked  {r-g:+.4f}")
-print(f"  mean-of-folds{pr-pg:+.4f}")
-print( "  If they agree and are under ~0.02: no scanner shortcut worth the name.")
-print( "  Our grouped CV is honest, the leaderboard gap is NOT leakage, and the")
-print( "  remaining suspects are label semantics and the blend.")
-print( "  If they agree and are above ~0.04: a real shortcut exists. Grouped is")
-print( "  our true skill and part of the leaderboard is site recognition -- an")
-print( "  upper bound on inflation, not proof of it.")
-print( "  If they disagree, the pooling artifact dominates and the run is a null.")
-print( "\n  Also compare each arm's printed 'gold' AUC against its OOF AUC above:")
-print( "  that difference is the teacher's error, which neither fold scheme")
-print( "  touches, and it is the third explanation for the leaderboard gap.")
+print(f"  Believe the per-fold macro: {pr-pg:+.4f}, std err of the difference")
+print(f"  about {se_d:.4f}. It is the only one of the three that never ranks a")
+print( "  study from one fold against a study from another, and cross-fold")
+print( "  contamination is the whole hazard here. It is also the noisiest, which")
+print( "  is why the standard error is printed rather than a threshold asserted.")
+print(f"  Pooled ({r_raw-g_raw:+.4f}) and fold-ranked ({r-g:+.4f}) are shown for")
+print( "  triangulation; a per-fold delta inside two standard errors of zero is")
+print( "  a null whatever they say.")
+print( "")
+print( "  A CLEAR POSITIVE is the trustworthy outcome. Epoch selection happens on")
+print( "  each fold's own validation set, and grouped folds are within-correlated,")
+print( "  so their selection bonus is the larger one -- that bias inflates grouped")
+print( "  and shrinks the delta. A positive result survives it; a null is exactly")
+print( "  what that bias would manufacture, so do not conclude 'no leakage' from a")
+print( "  null with any confidence.")
+print( "")
+print( "  If positive and clear: a scanner shortcut exists. Grouped is our true")
+print( "  skill. This is an UPPER BOUND on how much the leaderboard could be")
+print( "  inflated -- it does not prove the hidden test shares our sites.")
+print( "  If null: no shortcut this design can see. Compare the gold AUC above")
+print( "  against the OOF macro -- that difference is the teacher's error, the")
+print( "  third explanation for the leaderboard gap and the one still standing.")

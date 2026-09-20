@@ -304,6 +304,9 @@ def target_fingerprint(y: pd.DataFrame) -> str:
     # because the test sorted the frame before handing it over.
     y = y.sort_index()
     h = hashlib.md5()
+    # The ids too. Without them the stamp says "the same bits in sorted order",
+    # which two different study sets can satisfy.
+    h.update("|".join(map(str, y.index)).encode("utf-8", "replace"))
     for c in LABELS:
         if c in y:
             v = pd.to_numeric(y[c], errors="coerce").values
@@ -664,6 +667,10 @@ def train_fold(args, tr: pd.DataFrame, va: pd.DataFrame, gold: pd.DataFrame,
               f"{'bf16' if be.kind == 'xla' else 'fp16' if be.kind == 'cuda' else 'fp32'}")
         print(f"  peak memory {peak:.2f} of {total_gb:.1f} GB")
         per_epoch = secs * len(tr_dl) / 60
+        # Validation is not free: a full pass over the fold's held-out studies
+        # plus the gold 58, every epoch. Counting only train batches understated
+        # the projection by 10-15%, which is the wrong direction for a gate.
+        per_epoch *= 1 + len(va_dl) / max(len(tr_dl), 1)
         per_fold = per_epoch * args.epochs
         n_folds = 1 if args.only_fold is not None else args.folds
         total_min = per_fold * n_folds
@@ -849,7 +856,8 @@ def main() -> None:
             # The projection is per-fold and every fold costs the same, so the
             # other four rehearsals measure nothing and print over the one that
             # mattered -- the cell only tails the last.
-            print("rehearsal done (one fold measured; the rest cost the same)")
+            print("rehearsal done (fold 0 measured; GroupKFold packs greedily, "
+                  "so the other folds differ by a few percent)")
             return
         scores.append(s)
         oof.append(fold_oof)
