@@ -86,32 +86,65 @@ COMMON = ["--cache", cache, "--labels", lab[0], "--backbone", BACKBONE,
           "--lr", "1e-3", "--lr-backbone", "8e-6", "--unfreeze-last", "6",
           "--weight-decay", "0.02", "--sharpen-to", "source", "--seed", "42"]
 
-def run(extra, label):
-    """Run train.py and STOP on failure.
+# SMOKE TEST. One fold an arm instead of five, to prove this runs end to end
+# before it gets the big slice of the week. The previous attempt hung 76 seconds
+# into the first real fold and burned twelve hours producing nothing, and the
+# cause is still unknown -- so the next thing spent on it is 1.2 hours, not 6.
+#
+# READ THE NUMBER WITH CARE if it gets that far. With five folds both arms cover
+# all 4349 studies and the comparison is like for like. With ONE fold they do
+# not: grouped fold 0 is a particular set of scanners, random fold 0 is an
+# arbitrary 870 studies, and those two sets differ in difficulty for reasons
+# that have nothing to do with leakage. The point of this run is that it
+# FINISHES. The number is a bonus and a confounded one.
+ONLY_FOLD = 0          # set to None for the real five-fold run
+ARM_CEILING = 45 if ONLY_FOLD is not None else 180
 
-    The ! magic swallows exit status, so a REFUSED budget gate or a crashed arm
-    printed its error and the cell carried on to burn the next two hours. The
-    rehearsal below is only a gate if a failure actually stops the cell.
+import shlex
+
+def run(extra, label, ceiling):
+    """Launch train.py under a wall-clock ceiling, and stop on any failure.
+
+    Back to the ! magic. The rewrite used subprocess.run([sys.executable, ...]),
+    which the critic flagged as depending on ipykernel's fd capture rather than
+    on anything in this code -- "not the sure thing the rewrite assumes". It
+    demonstrably changed behaviour: every line the child printed was recorded
+    twice in the Kaggle log while lines from the notebook appeared once. That
+    does not prove it caused the hang, and reverting is a decision made on
+    suspicion. It is cheap suspicion.
+
+    The two things the rewrite was FOR are kept, because ! alone has neither:
+      * exit status, via IPython's _exit_code, so a REFUSED budget gate or a
+        crash stops the cell instead of being printed and ignored;
+      * a ceiling, via the shell's own timeout, which exits 124 when it fires.
     """
     print("\n" + "=" * 70 + f"\n{label}\n" + "=" * 70, flush=True)
-    r = subprocess.run([sys.executable, "-u", f"{CODE}/src/train.py"]
-                       + COMMON + extra)
-    if r.returncode != 0:
-        raise SystemExit(f"{label} exited {r.returncode} -- stopping before the "
-                         f"next arm burns a session on a broken run")
+    args = " ".join(shlex.quote(a) for a in COMMON + extra)
+    secs = ceiling * 60
+    t = time.time()
+    !timeout {secs} python -u $CODE/src/train.py {args}
+    code = _exit_code
+    if code == 124:
+        raise SystemExit(
+            f"{label} hit its {ceiling} min ceiling and was killed after "
+            f"{(time.time()-t)/60:.0f} min. The rehearsal projects far under "
+            f"that, so this is a hang, not a slow run -- the same failure as "
+            f"the 2026-09-20 session, and this time it cost {ceiling} minutes.")
+    if code != 0:
+        raise SystemExit(f"{label} exited {code} -- stopping before the next arm "
+                         f"burns a session on a broken run")
 
 t0 = time.time()
-# One rehearsal. Both arms cost the same, and train.py now measures one fold and
-# returns rather than repeating the identical projection five times.
-# 130 min/arm, not 260: the gate has to be tight enough that a 2x regression
-# trips it here rather than killing the session halfway through arm two.
-for arm in ["grouped", "random"]:
-    run(["--fold-grouping", arm, "--dry-run", "4", "--max-minutes", "130",
-         "--out", "/kaggle/working/rehearse"], f"rehearsal, {arm} split")
+fold_args = ["--only-fold", str(ONLY_FOLD)] if ONLY_FOLD is not None else []
 
 for arm in ["grouped", "random"]:
-    run(["--fold-grouping", arm, "--out", f"/kaggle/working/leak_{arm}"],
-        f"{arm} folds, five of them")
+    run(["--fold-grouping", arm, "--dry-run", "4", "--max-minutes", "130",
+         "--out", "/kaggle/working/rehearse"] + fold_args,
+        f"rehearsal, {arm} split", 20)
+
+for arm in ["grouped", "random"]:
+    run(["--fold-grouping", arm, "--out", f"/kaggle/working/leak_{arm}"] + fold_args,
+        f"{arm} folds ({'one' if ONLY_FOLD is not None else 'five'})", ARM_CEILING)
     print(f"\nelapsed {(time.time()-t0)/60:.0f} min", flush=True)
 
 # ---------------------------------------------------------------- scoring
@@ -131,8 +164,33 @@ for arm in ["grouped", "random"]:
     D[arm] = pd.read_csv(p).set_index("StudyInstanceUID").sort_index()
 
 print("\n" + "=" * 70)
-if not D["grouped"].index.equals(D["random"].index):
-    raise SystemExit("the two arms scored different studies -- comparison void")
+SAME_STUDIES = D["grouped"].index.equals(D["random"].index)
+if not SAME_STUDIES:
+    if ONLY_FOLD is None:
+        raise SystemExit("the two arms scored different studies -- comparison void")
+    # Expected on a one-fold smoke test and NOT a like-for-like comparison:
+    # grouped fold 0 is a set of scanners, random fold 0 is an arbitrary slice,
+    # and they differ in difficulty for reasons unrelated to leakage. Scored
+    # anyway so the plumbing is exercised; the delta is not evidence.
+    ov = len(D["grouped"].index.intersection(D["random"].index))
+    print(f"*** ONE-FOLD SMOKE TEST: the arms scored DIFFERENT studies")
+    print(f"*** grouped {len(D['grouped'])}, random {len(D['random'])}, "
+          f"{ov} in common. Any delta below is confounded by which studies")
+    print(f"*** each arm happened to hold. Treat this run as a pass/fail on")
+    print(f"*** whether the pipeline completes, not as a leakage measurement.")
+    # Score each arm on its own studies, per label, against its own targets.
+    for arm, d in D.items():
+        a = []
+        for c in LABELS:
+            y = pd.to_numeric(d[c + "__y"], errors="coerce").values
+            k = ~np.isnan(y); t = (y[k] > 0.5).astype(int)
+            if len(set(t)) > 1:
+                a.append(auc(t, d[c].values[k]))
+        print(f"    {arm:<10}macro {np.mean(a):.4f} over {len(a)} labels, "
+              f"{len(d)} studies")
+    print("\nPIPELINE OK -- both arms trained, scored and wrote their oof.")
+    print("Set ONLY_FOLD = None and rerun for the real five-fold comparison.")
+    raise SystemExit(0)
 stamps = {a: (d["__targets"].iloc[0] if "__targets" in d else "unstamped")
           for a, d in D.items()}
 print(f"target stamps: {stamps}")

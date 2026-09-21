@@ -50,11 +50,38 @@ sys.path.insert(0, SRC)
 print(f"src: {SRC}\nversion: {open(os.path.join(SRC,'SRC_VERSION.txt')).read().strip()}")
 from kaggle_paths import find, describe
 
+# The set greedy forward selection chose on 2026-09-21 over all eleven arms we
+# have, scored on one common yardstick: 0.8039, against 0.8032 for the seven that
+# scored 0.880 on the leaderboard.
+#
+# The change is the coronal arm. plane_fx_cor@planes-fixed was picked THIRD, worth
+# +0.0051, and pushed plane_cor@planes-5fold down to a +0.0002 afterthought -- the
+# two are 0.957 correlated, so this is the same arm trained better rather than a
+# new view. plane_fx_ax adds +0.0005 on the same pattern.
+#
+# plane_w_wide is deliberately NOT here. Greedy did pick it, for +0.0001, but it
+# is the only arm on a 1x63 layout and carrying it means building a whole extra
+# test cache. One ten-thousandth of a point does not buy a new failure surface on
+# a submission run.
+#
+# Attaching a notebook whose arms are not on this list is fine -- they are skipped
+# by name, not by which notebooks happen to be attached, so the submission is the
+# measured set rather than whatever was mounted.
+KEEP = {
+    "plane_sag@planes-5fold", "w_slot@full-v3", "plane_fx_cor@planes-fixed",
+    "plane_cnx_sag@convnext-sag-5f", "w_shared@full-v3", "plane_sag@planes-16ep",
+    "plane_fx_ax@planes-fixed", "plane_cor@planes-5fold",
+}
+
 import torch
 arms, layouts = {}, {}
+skipped = set()
 for p in sorted(find(suffix=".pt")):
     d = os.path.dirname(p)
     arm = f"{os.path.basename(d)}@{os.path.basename(os.path.dirname(d))}"
+    if KEEP and arm not in KEEP:
+        skipped.add(arm)
+        continue
     ck = torch.load(p, map_location="cpu", weights_only=False)
     man = ck.get("cache_manifest", {})
     key = hashlib.md5(json.dumps(
@@ -68,6 +95,14 @@ for p in sorted(find(suffix=".pt")):
     os.makedirs(a["dir"], exist_ok=True)
     shutil.copy(p, f"{a['dir']}/{os.path.basename(p)}")
 
+if skipped:
+    print(f"skipped {len(skipped)} arm(s) not in KEEP: {sorted(skipped)}")
+missing = KEEP - set(arms)
+if missing:
+    describe()
+    raise SystemExit(f"KEEP names {len(KEEP)} arms and {len(missing)} are not "
+                     f"attached: {sorted(missing)}. Submitting a subset of a "
+                     f"measured set is not the measured set.")
 if not arms:
     describe(); raise SystemExit("no checkpoints found -- attach the training notebooks")
 print(f"\n{len(arms)} arm(s) over {len(layouts)} layout(s):")
