@@ -1,32 +1,53 @@
 # ============================================================
 # RSNA Knee — SUBMISSION, weighted per ARM. Internet OFF.
 #
-# Seven arms across four data layouts:
-#   plane_sag@planes-5fold    1 seq x 24 slices, sagittal   DINOv2, 8 epochs
-#   plane_sag@planes-16ep     1 seq x 24 slices, sagittal   DINOv2, 16 epochs
-#   plane_cnx_sag@...         1 seq x 24 slices, sagittal   ConvNeXt
-#   plane_cor@planes-5fold    1 seq x 24 slices, coronal
-#   plane_ax@planes-5fold     1 seq x 24 slices, axial
-#   w_slot@full-v3            4 seq x 9 slices             slot head
-#   w_shared@full-v3          4 seq x 9 slices             shared head
+# Seven arms. Chosen by greedy forward selection over all eleven arms we have,
+# and confirmed under BOTH label yardsticks rather than the one the blend
+# happened to sort by:
 #
-# TWO THINGS THIS CELL MUST GET RIGHT, both of which the previous version did not:
+#   plane_sag@planes-5fold         1 seq x 24 slices, sagittal   DINOv2, 8 ep
+#   w_slot@full-v3                 4 seq x 9 slices              slot head
+#   plane_fx_cor@planes-fixed      1 seq x 24 slices, coronal    NEW, 09-13
+#   plane_cnx_sag@convnext-sag-5f  1 seq x 24 slices, sagittal   ConvNeXt
+#   w_shared@full-v3               4 seq x 9 slices              shared head
+#   plane_sag@planes-16ep          1 seq x 24 slices, sagittal   DINOv2, 16 ep
+#   plane_fx_ax@planes-fixed       1 seq x 24 slices, axial      NEW, 09-13
+#
+#                       gold yardstick   source yardstick
+#   the 7 that scored 0.880    0.8032           0.8213
+#   this set                   0.8036           0.8237
+#                             +0.0005          +0.0024
+#
+# The change is the coronal arm, and it is the only non-noise number here.
+# plane_fx_cor displaces plane_cor@planes-5fold, which the old set carried; the
+# two are 0.957 correlated, so this is the same view trained better rather than
+# a new one. Under the gold yardstick it enters third for +0.0051; under source
+# it enters SECOND for +0.0155 and the old coronal arm falls to tenth at
+# -0.0001. Checked both ways on purpose: greedy selects on marginal gain, which
+# is solo quality PLUS decorrelation from the incumbents, and an arm scored
+# against a target it did not train on is shifted relative to the others -- so a
+# foreign yardstick can flatter an arm into a blend. Here it did the opposite.
+# The old coronal arm is dropped because source, the yardstick that tracks the
+# leaderboard, scores it at -0.0008 to carry.
+#
+# plane_w_wide is not here and could not be. It is the only arm on a 1x63 layout
+# with a widened band, and the preprocess call below builds one band per layout;
+# an arm trained on a different one is unsubmittable by this cell as written.
+# Greedy valued it at +0.0001 anyway.
+#
+# TWO THINGS THIS CELL MUST GET RIGHT, both of which an earlier version did not:
 #
 # 1. Average per ARM, not per layout. Three arms read the sagittal cache. Grouping
 #    by layout gives them a combined 1/4 of the vote where the measurement that
-#    produced 0.8032 gave them 3/7. Same checkpoints, different submission.
+#    produced these numbers gave them 3/7.
 #
 # 2. Key arms by directory AND notebook. planes-5fold and planes-16ep both write
 #    "plane_sag"; keying on the directory alone keeps whichever is walked first
 #    and silently drops the other.
 #
-# Each distinct test cache is built once, however many arms read it.
-#
-# Pooled OOF: 0.8032 for all seven, against 0.7998 for the four-arm set that
-# scored 0.877. Internal gains have run ~4x smaller than leaderboard ones.
-#
 # Attach: competition, abdullahwasee/rsna-knee-src, planes-5fold, planes-16ep,
-#         convnext-sag-5f, full-v3, metaresearch/dinov2. GPU. INTERNET OFF.
+#         convnext-sag-5f, full-v3, planes-fixed, metaresearch/dinov2.
+#         GPU. INTERNET OFF.
 # ============================================================
 import sys, os, time, shutil, glob, json, hashlib
 import numpy as np, pandas as pd
@@ -50,27 +71,14 @@ sys.path.insert(0, SRC)
 print(f"src: {SRC}\nversion: {open(os.path.join(SRC,'SRC_VERSION.txt')).read().strip()}")
 from kaggle_paths import find, describe
 
-# The set greedy forward selection chose on 2026-09-21 over all eleven arms we
-# have, scored on one common yardstick: 0.8039, against 0.8032 for the seven that
-# scored 0.880 on the leaderboard.
-#
-# The change is the coronal arm. plane_fx_cor@planes-fixed was picked THIRD, worth
-# +0.0051, and pushed plane_cor@planes-5fold down to a +0.0002 afterthought -- the
-# two are 0.957 correlated, so this is the same arm trained better rather than a
-# new view. plane_fx_ax adds +0.0005 on the same pattern.
-#
-# plane_w_wide is deliberately NOT here. Greedy did pick it, for +0.0001, but it
-# is the only arm on a 1x63 layout and carrying it means building a whole extra
-# test cache. One ten-thousandth of a point does not buy a new failure surface on
-# a submission run.
-#
-# Attaching a notebook whose arms are not on this list is fine -- they are skipped
-# by name, not by which notebooks happen to be attached, so the submission is the
-# measured set rather than whatever was mounted.
+# The arms, by name. Selecting on names rather than on whichever notebooks
+# happen to be mounted is what makes the submission the measured set: attach an
+# extra notebook and its arms are skipped, forget a needed one and the run stops
+# instead of quietly filing a subset. The header above says which seven and why.
 KEEP = {
     "plane_sag@planes-5fold", "w_slot@full-v3", "plane_fx_cor@planes-fixed",
     "plane_cnx_sag@convnext-sag-5f", "w_shared@full-v3", "plane_sag@planes-16ep",
-    "plane_fx_ax@planes-fixed", "plane_cor@planes-5fold",
+    "plane_fx_ax@planes-fixed",
 }
 
 import torch
@@ -84,16 +92,33 @@ for p in sorted(find(suffix=".pt")):
         continue
     ck = torch.load(p, map_location="cpu", weights_only=False)
     man = ck.get("cache_manifest", {})
+    if not man:
+        # infer.py prints "parity NOT verified" and proceeds. That is the one
+        # path here that yields a silently WRONG submission rather than a loud
+        # failure: the layout would be rebuilt from defaults and the arm would
+        # still take its full share of the vote.
+        raise SystemExit(f"{arm} has no cache manifest in {os.path.basename(p)}; "
+                         f"parity cannot be verified and the arm would vote anyway")
     key = hashlib.md5(json.dumps(
-        {k: man.get(k) for k in ("slots", "size", "crop_mm", "n_anchors",
-                                 "n_slices", "laterality", "only_slot")},
+        # Every field infer.py's parity check compares, or two arms that differ
+        # only in band collapse onto one layout, one cache gets built, and
+        # check_parity refuses the odd one out -- AFTER every layout has been
+        # preprocessed. Loud, but an hour late.
+        {k: str(man.get(k)) for k in ("slots", "size", "crop_mm", "n_anchors",
+                                      "group", "n_slices", "band", "laterality",
+                                      "slot_scheme", "only_slot")},
         sort_keys=True).encode()).hexdigest()[:8]
     a = arms.setdefault(arm, {"layout": key, "dir": f"/kaggle/working/arms/{arm}"})
     if a["layout"] != key:
         raise SystemExit(f"{arm} mixes checkpoints from two different caches")
     layouts.setdefault(key, man)
     os.makedirs(a["dir"], exist_ok=True)
-    shutil.copy(p, f"{a['dir']}/{os.path.basename(p)}")
+    # symlink, not copy: infer.py globs *.pt and follows links, and copying
+    # thirty-five checkpoints spends several GB of a 20 GB working quota to
+    # duplicate files that are already mounted.
+    link = f"{a['dir']}/{os.path.basename(p)}"
+    if not os.path.exists(link):
+        os.symlink(p, link)
 
 if skipped:
     print(f"skipped {len(skipped)} arm(s) not in KEEP: {sorted(skipped)}")
@@ -116,11 +141,13 @@ t0 = time.time()
 for key, m in layouts.items():
     cache = f"/kaggle/working/test_{key}"
     lat = "" if m.get("laterality", False) else "--no-laterality"
+    bnd = f"--band {m['band'][0]} {m['band'][1]}" if m.get("band") else ""
     slot = f"--only-slot {m['only_slot']}" if m.get("only_slot") is not None else ""
     print("\n" + "=" * 66 + f"\nlayout {key}: preprocess\n" + "=" * 66, flush=True)
     !python $SRC/preprocess.py --out $cache --split test --workers 4 \
         --slots {m.get('slots',4)} --size {m.get('size',288)} \
-        --crop-mm {m.get('crop_mm',140.0)} --anchors {m.get('n_anchors',3)} {slot} {lat}
+        --crop-mm {m.get('crop_mm',140.0)} --anchors {m.get('n_anchors',3)} \
+        {bnd} {slot} {lat}
     print(f"elapsed {(time.time()-t0)/60:.1f} min", flush=True)
 
 # Intermediates live in a subdirectory: left at the top level, Kaggle's submit
@@ -160,6 +187,11 @@ print(f"\nsubmission: {base.shape[0]} rows x {base.shape[1]} cols "
       f"from {len(frames)} arm(s)")
 print(base.head(3).to_string())
 print(f"\ntotal {(time.time()-t0)/60:.1f} min")
-print("\nPooled OOF for all seven arms: 0.8032; the four-arm set was 0.7998 and")
-print("scored 0.877. Internal gains have run ~4x smaller than leaderboard ones,")
-print("so +0.0034 here has been worth nearer +0.013 there. Record the gap.")
+print("\nThis set scores 0.8036 on the gold yardstick and 0.8237 on source,")
+print("against 0.8032 and 0.8213 for the seven arms that scored 0.880 on")
+print("2026-09-09. So +0.0005 / +0.0024 depending on the ruler, and source is")
+print("the one that has tracked the leaderboard (0.8037 + the stable 0.077 gap")
+print("lands on the 0.880 we actually scored).")
+print("Internal gains have historically run smaller than leaderboard ones, but")
+print("the blend has been saturating for a while -- +0.0129, +0.0051, +0.0020,")
+print("+0.0013, +0.0007. Record what this scores; a flat result is informative.")
