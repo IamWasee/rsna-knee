@@ -10,7 +10,7 @@
 #   planes-5fold sag   8 ep, gold-sharp    0.7811     0.822
 #   planes-16ep sag   16 ep, gold-sharp    0.7777     0.841   (+0.019)
 #   planes-fixed sag   8 ep, source        0.7802     0.846   (+0.024)
-#   sharpen-source     8 ep, source          --       0.846   (replicate)
+#   sharpen-source     8 ep, source          --       0.846   (same seed rerun)
 #
 # Every one of five folds beat every one of the baseline's five, for both. They
 # have never been combined. This run combines them, and is judged on gold: the
@@ -19,7 +19,7 @@
 # not the absolute level.
 #
 # ~46 min/fold from the leak-folds rehearsal (2.9 min/epoch at 8 epochs, with
-# validation), ~3.9h for five, against Kaggle's 12h. Gated at 280 min and killed
+# validation), ~3.9h for five, against Kaggle's 12h. Gated at 300 min and killed
 # at 330 -- the last run with no ceiling hung and burned twelve hours.
 #
 # Attach: competition, cache-sag, stevenleehans labels, dinov2. GPU, Internet on.
@@ -76,7 +76,7 @@ def run(extra, label, ceiling):
     args = " ".join(shlex.quote(a) for a in COMMON + extra)
     secs = ceiling * 60
     t = time.time()
-    !timeout {secs} python -u $CODE/src/train.py {args}
+    !timeout -k 60 {secs} python -u $CODE/src/train.py {args}
     code = _exit_code
     if code == 124:
         raise SystemExit(f"{label} hit its {ceiling} min ceiling after "
@@ -85,7 +85,7 @@ def run(extra, label, ceiling):
         raise SystemExit(f"{label} exited {code}")
 
 t0 = time.time()
-run(["--dry-run", "4", "--max-minutes", "280", "--out", "/kaggle/working/rehearse"],
+run(["--dry-run", "4", "--max-minutes", "300", "--out", "/kaggle/working/rehearse"],
     "rehearsal", 20)
 OUT = "/kaggle/working/plane_s16_sag"
 run(["--out", OUT], "five folds, 16 epochs, source", 330)
@@ -102,19 +102,27 @@ for p in sorted(glob.glob(f"{OUT}/fold*.pt")):
 if len(g) != 5:
     raise SystemExit(f"{len(g)} of 5 folds saved a checkpoint")
 m = float(np.mean(g))
+# Paired, fold by fold. Folds are identical across these runs (same labels, same
+# seed, deterministic grouping), so fold i here and fold i of planes-fixed hold
+# the same studies. A mean edge over the unpaired 0.846 would call 0.847 a gain;
+# seed-to-seed variance on gold has never been measured, so ask for a margin and
+# for the direction to hold in most folds.
+BASE = [0.840, 0.844, 0.852, 0.851, 0.842]   # planes-fixed sag, gold at best-OOF epoch
+d = [a - b for a, b in zip(g, BASE)]
+up = sum(x > 0 for x in d)
 print("\n" + "=" * 70)
 print(f"GOLD 58, mean of five folds: {m:.3f}   (fold range {min(g):.3f}-{max(g):.3f})")
-print("  planes-5fold sag   8 ep, gold-sharp   0.822   (0.812-0.825)")
-print("  planes-16ep sag   16 ep, gold-sharp   0.841   (0.826-0.850)")
-print("  planes-fixed sag   8 ep, source       0.846   (0.840-0.852)")
-print(f"  THIS              16 ep, source       {m:.3f}   ({min(g):.3f}-{max(g):.3f})")
+print("  planes-5fold sag   8 ep, gold-sharp   0.822")
+print("  planes-16ep sag   16 ep, gold-sharp   0.841")
+print("  planes-fixed sag   8 ep, source       0.846")
+print(f"  THIS              16 ep, source       {m:.3f}")
+print("\npaired against planes-fixed, fold by fold: " +
+      "  ".join(f"{x:+.3f}" for x in d) + f"   mean {np.mean(d):+.4f}, {up}/5 up")
 print()
-if min(g) > 0.852:
-    print("Every fold beats every fold of the best single change. The two combine;")
-    print("next is the same pair of settings on coronal and axial, then submit.")
-elif m > 0.846:
-    print("Ahead on the mean but the fold ranges overlap: a likely gain, not a")
-    print("clean one. Worth the other two planes; confirm on the leaderboard.")
+if np.mean(d) >= 0.005 and up >= 4:
+    print("The two combine. Same settings on coronal and axial next, then submit.")
+elif np.mean(d) > 0:
+    print("Ahead, but inside what seed noise could do. Not enough to double the")
+    print("training cost on the other planes; keep 8 epochs with source.")
 else:
-    print("No better than source alone at 8 epochs. The two do not stack --")
-    print("keep 8 epochs, which costs half as much, and move on.")
+    print("No better than source at 8 epochs. They do not stack -- keep 8 epochs.")
