@@ -13,8 +13,8 @@
 # fold by fold against planes-fixed's source-sharpened 8-epoch arm on that
 # plane, which is the arm the 0.882 submission carries.
 #
-# Sagittal took 3.2h for five folds. Gated at 240 min, killed at 270, so both
-# planes' worst case stays well inside Kaggle's 12h.
+# Sagittal took 3.2h for five folds. Gated at 300 min, killed at 330; each notebook has its own 12h, so
+# a tighter gate would only risk refusing a run that fits.
 #
 # Attach: competition, cache-<plane>, stevenleehans labels, dinov2. GPU, internet on.
 # ============================================================
@@ -85,10 +85,10 @@ def run(extra, label, ceiling):
         raise SystemExit(f"{label} exited {code}")
 
 t0 = time.time()
-run(["--dry-run", "4", "--max-minutes", "240", "--out", "/kaggle/working/rehearse"],
+run(["--dry-run", "4", "--max-minutes", "300", "--out", "/kaggle/working/rehearse"],
     "rehearsal", 20)
 OUT = f"/kaggle/working/plane_s16_{PLANE}"
-run(["--out", OUT], f"{PLANE}: five folds, 16 epochs, source", 270)
+run(["--out", OUT], f"{PLANE}: five folds, 16 epochs, source", 330)
 print(f"\nelapsed {(time.time()-t0)/60:.0f} min")
 
 # ------------------------------------------------------------- the verdict
