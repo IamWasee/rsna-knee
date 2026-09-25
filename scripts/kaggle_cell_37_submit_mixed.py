@@ -60,7 +60,7 @@ from kaggle_paths import find, describe
 # The arms, by name. Selecting on names rather than on whichever notebooks
 # happen to be mounted is what makes the submission the measured set: attach an
 # extra notebook and its arms are skipped, forget a needed one and the run stops
-# instead of quietly filing a subset. The header above says which seven and why.
+# instead of quietly filing a subset. The header above says which three and why.
 KEEP = {
     "plane_s16_sag@sag-16ep-source", "plane_s16_cor@cor-16ep-source",
     "plane_s16_ax@ax-16ep-source",
@@ -150,7 +150,7 @@ for arm, a in sorted(arms.items()):
     subs.append(out)
     print(f"elapsed {(time.time()-t0)/60:.1f} min", flush=True)
 
-# Rank-average across ARMS, equally -- the weighting the 0.8032 measurement used.
+# Rank-average across ARMS, equally -- the weighting every blend number in the header used.
 # infer.py already rank-averaged the folds inside each arm.
 from config import ID_COL, LABELS
 frames = [pd.read_csv(s) for s in subs]
