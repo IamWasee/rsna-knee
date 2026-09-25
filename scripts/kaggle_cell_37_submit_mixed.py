@@ -1,52 +1,38 @@
 # ============================================================
 # RSNA Knee — SUBMISSION, weighted per ARM. Internet OFF.
 #
-# Seven arms. Chosen by greedy forward selection over all eleven arms we have,
-# and confirmed under BOTH label yardsticks rather than the one the blend
-# happened to sort by:
+# Three arms: one per plane, each trained 16 epochs with --sharpen-to source.
 #
-#   plane_sag@planes-5fold         1 seq x 24 slices, sagittal   DINOv2, 8 ep
-#   w_slot@full-v3                 4 seq x 9 slices              slot head
-#   plane_fx_cor@planes-fixed      1 seq x 24 slices, coronal    NEW, 09-13
-#   plane_cnx_sag@convnext-sag-5f  1 seq x 24 slices, sagittal   ConvNeXt
-#   w_shared@full-v3               4 seq x 9 slices              shared head
-#   plane_sag@planes-16ep          1 seq x 24 slices, sagittal   DINOv2, 16 ep
-#   plane_fx_ax@planes-fixed       1 seq x 24 slices, axial      NEW, 09-13
+#   plane_s16_sag@sag-16ep-source   1 seq x 24 slices, sagittal   DINOv2
+#   plane_s16_cor@cor-16ep-source   1 seq x 24 slices, coronal    DINOv2
+#   plane_s16_ax@ax-16ep-source     1 seq x 24 slices, axial      DINOv2
 #
-#                       gold yardstick   source yardstick
-#   the 7 that scored 0.880    0.8032           0.8213
-#   this set                   0.8036           0.8237
-#                             +0.0005          +0.0024
+# On the 58 radiologist-labelled studies -- the only labels we have from the
+# same source as the leaderboard's -- each beats the arm it replaces fold by
+# fold, 5 of 5 folds, paired on the same studies:
 #
-# The change is the coronal arm, and it is the only non-noise number here.
-# plane_fx_cor displaces plane_cor@planes-5fold, which the old set carried; the
-# two are 0.957 correlated, so this is the same view trained better rather than
-# a new one. Under the gold yardstick it enters third for +0.0051; under source
-# it enters SECOND for +0.0155 and the old coronal arm falls to tenth at
-# -0.0001. Checked both ways on purpose: greedy selects on marginal gain, which
-# is solo quality PLUS decorrelation from the incumbents, and an arm scored
-# against a target it did not train on is shifted relative to the others -- so a
-# foreign yardstick can flatter an arm into a blend. Here it did the opposite.
-# The old coronal arm is dropped because source, the yardstick that tracks the
-# leaderboard, scores it at -0.0008 to carry.
+#            this arm   replaces (8 ep, source)   paired mean
+#   sag       0.855          0.846                  +0.0095
+#   cor       0.842          0.818                  +0.0238
+#   ax        0.852          0.812                  +0.0404
 #
-# plane_w_wide is not here and could not be. It is the only arm on a 1x63 layout
-# with a widened band, and the preprocess call below builds one band per layout;
-# an arm trained on a different one is unsubmittable by this cell as written.
-# Greedy valued it at +0.0001 anyway.
+# They are the three best arms we have on gold, and on both report-label
+# yardsticks the three alone beat every larger set that includes them:
 #
-# TWO THINGS THIS CELL MUST GET RIGHT, both of which an earlier version did not:
+#                                gold-yard   source-yard
+#   the seven that scored 0.882    0.8036      0.8237
+#   these three                    0.8132      0.8407
+#   these three + slot/shared      0.8107      0.8349
 #
-# 1. Average per ARM, not per layout. Three arms read the sagittal cache. Grouping
-#    by layout gives them a combined 1/4 of the vote where the measurement that
-#    produced these numbers gave them 3/7.
+# So the older arms are dropped rather than kept for diversity: each is now
+# worse on gold and dilutes the blend on both report yardsticks.
 #
-# 2. Key arms by directory AND notebook. planes-5fold and planes-16ep both write
-#    "plane_sag"; keying on the directory alone keeps whichever is walked first
-#    and silently drops the other.
+# Caveat: every one of the 58 gold studies has at least one finding, so gold
+# measures telling abnormal knees apart. The hidden test has normal ones too;
+# the gain may shrink there. This submission is the test of that.
 #
-# Attach: competition, abdullahwasee/rsna-knee-src, planes-5fold, planes-16ep,
-#         convnext-sag-5f, full-v3, planes-fixed, metaresearch/dinov2.
+# Attach: competition, abdullahwasee/rsna-knee-src, sag-16ep-source,
+#         cor-16ep-source, ax-16ep-source, metaresearch/dinov2.
 #         GPU. INTERNET OFF.
 # ============================================================
 import sys, os, time, shutil, glob, json, hashlib
@@ -76,9 +62,8 @@ from kaggle_paths import find, describe
 # extra notebook and its arms are skipped, forget a needed one and the run stops
 # instead of quietly filing a subset. The header above says which seven and why.
 KEEP = {
-    "plane_sag@planes-5fold", "w_slot@full-v3", "plane_fx_cor@planes-fixed",
-    "plane_cnx_sag@convnext-sag-5f", "w_shared@full-v3", "plane_sag@planes-16ep",
-    "plane_fx_ax@planes-fixed",
+    "plane_s16_sag@sag-16ep-source", "plane_s16_cor@cor-16ep-source",
+    "plane_s16_ax@ax-16ep-source",
 }
 
 import torch
@@ -187,11 +172,6 @@ print(f"\nsubmission: {base.shape[0]} rows x {base.shape[1]} cols "
       f"from {len(frames)} arm(s)")
 print(base.head(3).to_string())
 print(f"\ntotal {(time.time()-t0)/60:.1f} min")
-print("\nThis set scores 0.8036 on the gold yardstick and 0.8237 on source,")
-print("against 0.8032 and 0.8213 for the seven arms that scored 0.880 on")
-print("2026-09-09. So +0.0005 / +0.0024 depending on the ruler, and source is")
-print("the one that has tracked the leaderboard (0.8037 + the stable 0.077 gap")
-print("lands on the 0.880 we actually scored).")
-print("Internal gains have historically run smaller than leaderboard ones, but")
-print("the blend has been saturating for a while -- +0.0129, +0.0051, +0.0020,")
-print("+0.0013, +0.0007. Record what this scores; a flat result is informative.")
+print("\nThree arms, 16 epochs + source sharpening, one per plane. On the 58")
+print("radiologist-labelled studies: sag 0.855, cor 0.842, ax 0.852, each beating")
+print("the arm it replaced on 5 of 5 folds. The previous submission scored 0.882.")
