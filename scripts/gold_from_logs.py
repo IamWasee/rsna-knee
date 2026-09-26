@@ -43,16 +43,27 @@ def arms(path):
         out.append(cur)
     res = []
     for a in out:
-        best = {}
+        best, tied = {}, {}
         for f, e, o, g in a:
             if f not in best or o > best[f][0]:
                 best[f] = (o, g, int(e))
-        res.append(best)
+                tied[f] = {round(g, 3)}
+            elif o == best[f][0]:
+                tied[f].add(round(g, 3))
+        # The log rounds OOF to 3 decimals, so two epochs can tie here while
+        # train.py, comparing unrounded values, kept either one. When the tied
+        # epochs disagree on gold, this log cannot say which was kept: on
+        # ax-24ep-source fold 1 the log read 0.843 and the checkpoint held 0.854.
+        amb = {f: sorted(v) for f, v in tied.items() if len(v) > 1}
+        res.append((best, amb))
     return res
 
 
 if __name__ == "__main__":
-    for i, b in enumerate(arms(sys.argv[1])):
+    for i, (b, amb) in enumerate(arms(sys.argv[1])):
         g = [b[f][1] for f in sorted(b)]
         print(f"arm {i}: {len(b)} folds  gold per fold {g}  mean {np.mean(g):.4f}  "
               f"(kept epochs {[b[f][2] for f in sorted(b)]})")
+        for f, v in sorted(amb.items()):
+            print(f"  fold {int(f)}: OOF tied at 3 decimals across epochs with gold {v} -- "
+                  f"read gold_auc from fold{int(f)}.pt for the exact value")
