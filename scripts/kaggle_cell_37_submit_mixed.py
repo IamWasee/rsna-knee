@@ -23,9 +23,12 @@
 # two independent draws of the same model, which cancels part of each one's
 # training noise. Equal weight per arm keeps each plane at a third of the vote.
 #
-# The seed runs also measured that noise: a five-fold mean gold difference
-# between two seeds of one recipe has an SD of ~0.006, so a real gain now needs
-# about +0.013, not the +0.005 used before.
+# The seed runs also measured that noise. The three planes' five-fold mean gold
+# differences between seeds were +0.0095, -0.0050, +0.0011: an SD of ~0.006, so
+# a real gain now needs about +0.013, not the +0.005 used before. (Cell 42's own
+# printout says ~0.003-0.004; it assumes the five folds move independently, and
+# they don't -- a seed shifts all five together, as sagittal's five-up +0.0095
+# showed.)
 #
 # Attach: competition, abdullahwasee/rsna-knee-src, {sag,cor,ax}-16ep-source,
 #         {sag,cor,ax}-16ep-seed43, metaresearch/dinov2.
@@ -97,7 +100,7 @@ for p in sorted(find(suffix=".pt")):
     layouts.setdefault(key, man)
     os.makedirs(a["dir"], exist_ok=True)
     # symlink, not copy: infer.py globs *.pt and follows links, and copying
-    # thirty-five checkpoints spends several GB of a 20 GB working quota to
+    # every fold of every arm spends several GB of a 20 GB working quota to
     # duplicate files that are already mounted.
     link = f"{a['dir']}/{os.path.basename(p)}"
     if not os.path.exists(link):
