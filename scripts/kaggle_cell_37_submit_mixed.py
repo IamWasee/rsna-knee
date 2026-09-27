@@ -1,38 +1,34 @@
 # ============================================================
 # RSNA Knee — SUBMISSION, weighted per ARM. Internet OFF.
 #
-# Three arms: one per plane, each trained 16 epochs with --sharpen-to source.
+# Six arms: the three that scored 0.909, plus the same recipe retrained on a
+# second seed. One per plane per seed, each 16 epochs with --sharpen-to source.
 #
-#   plane_s16_sag@sag-16ep-source   1 seq x 24 slices, sagittal   DINOv2
-#   plane_s16_cor@cor-16ep-source   1 seq x 24 slices, coronal    DINOv2
-#   plane_s16_ax@ax-16ep-source     1 seq x 24 slices, axial      DINOv2
+#   plane_s16_{sag,cor,ax}@{plane}-16ep-source       seed 42   (the 0.909 set)
+#   plane_s16s43_{sag,cor,ax}@{plane}-16ep-seed43    seed 43
 #
-# On the 58 radiologist-labelled studies -- the only labels we have from the
-# same source as the leaderboard's -- each beats the arm it replaces fold by
-# fold, 5 of 5 folds, paired on the same studies:
+# Gold-58 per arm, exact from the checkpoints:
+#            seed 42   seed 43
+#   sag      0.8553    0.8648
+#   cor      0.8422    0.8372
+#   ax       0.8522    0.8533
 #
-#            this arm   replaces (8 ep, source)   paired mean
-#   sag       0.855          0.846                  +0.0095
-#   cor       0.842          0.818                  +0.0238
-#   ax        0.852          0.812                  +0.0404
+# Rank-blended, on both report-label yardsticks:
+#                          gold-yard   source-yard
+#   3 arms, seed 42          0.8132      0.8407     <- scored 0.909
+#   3 arms, seed 43          0.8138      0.8405
+#   6 arms, both seeds       0.8169      0.8443     +0.0037 / +0.0036
 #
-# They are the three best arms we have on gold, and on both report-label
-# yardsticks the three alone beat every larger set that includes them:
+# The second seed alone is no better than the first; the gain is from averaging
+# two independent draws of the same model, which cancels part of each one's
+# training noise. Equal weight per arm keeps each plane at a third of the vote.
 #
-#                                gold-yard   source-yard
-#   the seven that scored 0.882    0.8036      0.8237
-#   these three                    0.8132      0.8407
-#   these three + slot/shared      0.8107      0.8349
+# The seed runs also measured that noise: a five-fold mean gold difference
+# between two seeds of one recipe has an SD of ~0.006, so a real gain now needs
+# about +0.013, not the +0.005 used before.
 #
-# So the older arms are dropped rather than kept for diversity: each is now
-# worse on gold and dilutes the blend on both report yardsticks.
-#
-# Caveat: every one of the 58 gold studies has at least one finding, so gold
-# measures telling abnormal knees apart. The hidden test has normal ones too;
-# the gain may shrink there. This submission is the test of that.
-#
-# Attach: competition, abdullahwasee/rsna-knee-src, sag-16ep-source,
-#         cor-16ep-source, ax-16ep-source, metaresearch/dinov2.
+# Attach: competition, abdullahwasee/rsna-knee-src, {sag,cor,ax}-16ep-source,
+#         {sag,cor,ax}-16ep-seed43, metaresearch/dinov2.
 #         GPU. INTERNET OFF.
 # ============================================================
 import sys, os, time, shutil, glob, json, hashlib
@@ -60,10 +56,12 @@ from kaggle_paths import find, describe
 # The arms, by name. Selecting on names rather than on whichever notebooks
 # happen to be mounted is what makes the submission the measured set: attach an
 # extra notebook and its arms are skipped, forget a needed one and the run stops
-# instead of quietly filing a subset. The header above says which three and why.
+# instead of quietly filing a subset. The header above says which six and why.
 KEEP = {
     "plane_s16_sag@sag-16ep-source", "plane_s16_cor@cor-16ep-source",
     "plane_s16_ax@ax-16ep-source",
+    "plane_s16s43_sag@sag-16ep-seed43", "plane_s16s43_cor@cor-16ep-seed43",
+    "plane_s16s43_ax@ax-16ep-seed43",
 }
 
 import torch
@@ -172,6 +170,6 @@ print(f"\nsubmission: {base.shape[0]} rows x {base.shape[1]} cols "
       f"from {len(frames)} arm(s)")
 print(base.head(3).to_string())
 print(f"\ntotal {(time.time()-t0)/60:.1f} min")
-print("\nThree arms, 16 epochs + source sharpening, one per plane. On the 58")
-print("radiologist-labelled studies: sag 0.855, cor 0.842, ax 0.852, each beating")
-print("the arm it replaced on 5 of 5 folds. The previous submission scored 0.882.")
+print("\nSix arms: 16 epochs + source sharpening, one per plane per seed (42, 43).")
+print("Blend +0.0037 / +0.0036 over the 3-arm set that scored 0.909, on both")
+print("report-label yardsticks.")
