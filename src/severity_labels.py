@@ -25,9 +25,13 @@ above the table's "not mentioned" level (0.25), so a small effusion still ranks
 above no word about effusion at all.
 
 The word lists are written from the host's criteria and ordinary radiology
-usage in the nine report languages, NOT from reading the 58 gold reports: those
-are the only honest ruler for this change, and rules fitted to them would
-measure nothing. Run it, then score once with scripts/label_audit.py.
+usage in the nine report languages, and their scoping was corrected by reading
+rule decisions on reports OUTSIDE the 58. But the idea itself is not independent
+of the 58: it came from reading the 50 gold reports whose labels were wrong,
+before any rule existed. So the table-level gain measured on the 58 (precision
+0.69 -> 0.80) is partly in-sample. The rules were then committed (2af829f) and
+scored once, and must not be tuned against the 58 again. Run it, then score with
+scripts/label_audit.py.
 
     python src/severity_labels.py data/audit/train.csv data/audit/llm_labels_v4_blend.csv \\
         data/audit/labels_severity.csv

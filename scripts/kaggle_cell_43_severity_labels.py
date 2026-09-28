@@ -3,9 +3,11 @@
 # Pushed per plane: --sub PLANE=ax.
 #
 # The labels every arm trains on mark a finding present whenever a report names
-# it. src/severity_labels.py (commit 2af829f, fixed before any gold scoring)
-# moves the ones the report calls small, mild, low-grade or hedged to 0.35,
-# following the host's thresholds. Scored once against the 58:
+# it. src/severity_labels.py (commit 2af829f) moves the ones the report calls
+# small, mild, low-grade or hedged to 0.35, following the host's thresholds. The
+# rules were committed before any gold scoring, but the idea came from reading
+# the 58's mislabelled reports, so the table's own gain below is partly
+# in-sample. Scored once against the 58:
 #
 #                              precision  recall  false alarms  macro AUC
 #   llm_labels_v4_blend          0.69      0.84        89         0.893
@@ -128,11 +130,13 @@ print(f"  severity labels " + "  ".join(f"{x:.4f}" for x in g) + f"   mean {m:.4
 print(f"  difference      " + "  ".join(f"{x:+.4f}" for x in d) + f"   mean {np.mean(d):+.4f}")
 print()
 if np.mean(d) >= BAR:
-    print(f"Clears the +{BAR} bar. The severity labels help training on {PLANE};")
-    print("carry them to the other planes.")
+    print(f"Clears the +{BAR} bar. The severity labels help training on {PLANE}.")
+    print("The idea came from reading the 58, so confirm on the leaderboard before")
+    print("spending on the other planes.")
 elif np.mean(d) > -BAR:
-    print(f"Inside +/-{BAR}: indistinguishable from seed noise. Not worth retraining")
-    print("the other planes for; may still add variety to a blend.")
+    print(f"Inside +/-{BAR}: underpowered rather than proven null -- the two runs")
+    print("share seed 42, so real noise is below the bar. Not worth retraining the")
+    print("other planes for; may still add variety to a blend.")
 else:
     print(f"Worse by more than {BAR}. The cleaner positives do not make up for the")
     print("worse ranking. Keep the old labels.")
