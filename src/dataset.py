@@ -37,10 +37,21 @@ AUG_INTENSITY = 0.10
 
 class KneeStudies(Dataset):
     def __init__(self, df: pd.DataFrame, cache: Path, train: bool = True,
-                 slots: int = 4, n_slices: int = 9, size: int = 256):
+                 slots: int = 4, n_slices: int = 9, size: int = 256,
+                 augment: bool = True, sample_groups: int = 0):
         self.df = df.reset_index(drop=True)
         self.cache = Path(cache)
         self.train = train
+        # Both default to exactly the behaviour every existing arm trained with.
+        # augment=False switches off the rigid jitter and intensity scale, so their
+        # contribution can be measured rather than assumed.
+        # sample_groups=K (training only) keeps K of the study's three-slice groups,
+        # chosen at random each time and kept in stack order. Each epoch then sees a
+        # different subset of the same knee -- the one augmentation the author of a
+        # public 0.924 model used, and random slice shifting was among the tricks the
+        # 2024 RSNA spine winners credited. Evaluation always sees every group.
+        self.augment = augment
+        self.sample_groups = sample_groups
         self.shape = (slots, n_slices, size, size)
         self.has_labels = all(c in df.columns for c in LABELS)
         self.has_conf = all(c in df.columns for c in CONF)
@@ -109,12 +120,15 @@ class KneeStudies(Dataset):
     def __getitem__(self, i: int):
         row = self.df.iloc[i]
         vol = self._load(row[ID_COL])
-        if self.train:
+        if self.train and self.augment:
             vol = self._augment(vol)
 
         slots, n_slices, h, w = vol.shape
         # (slots, 9, H, W) -> (slots*3, 3, H, W): each triplet is one RGB input.
         x = vol.reshape(slots * (n_slices // GROUP), GROUP, h, w).astype(np.float32) / 255.0
+        k = self.sample_groups
+        if self.train and k and k < x.shape[0]:
+            x = x[np.sort(np.random.choice(x.shape[0], k, replace=False))]
         x = (x - MEAN[None, :, None, None]) / STD[None, :, None, None]
         x = torch.from_numpy(x)
 

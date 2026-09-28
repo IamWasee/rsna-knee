@@ -567,7 +567,11 @@ def train_fold(args, tr: pd.DataFrame, va: pd.DataFrame, gold: pd.DataFrame,
                  n_slices=args.n_slices, size=args.size)
     dl_kw = dict(num_workers=args.workers, pin_memory=(be.kind == "cuda"))
 
-    tr_dl = DataLoader(KneeStudies(tr, train=True, **ds_kw),
+    if args.sample_groups and args.head not in ("shared", "topk", "gru"):
+        raise SystemExit(f"--sample-groups needs a head that accepts a variable number "
+                         f"of groups (shared, topk, gru); --head {args.head} fixes it")
+    tr_dl = DataLoader(KneeStudies(tr, train=True, augment=args.augment,
+                                   sample_groups=args.sample_groups, **ds_kw),
                        batch_size=args.batch, shuffle=True, drop_last=True, **dl_kw)
     va_dl = DataLoader(KneeStudies(va, train=False, **ds_kw),
                        batch_size=args.batch, **dl_kw)
@@ -695,6 +699,7 @@ def train_fold(args, tr: pd.DataFrame, va: pd.DataFrame, gold: pd.DataFrame,
         return float("nan"), None
 
     best, best_oof = -1.0, None
+    kept: list[tuple[float, int, dict]] = []   # (val_auc, epoch, cpu state) for --avg-top
     for epoch in range(args.epochs):
         model.train()
         t0, total = time.time(), 0.0
@@ -726,6 +731,12 @@ def train_fold(args, tr: pd.DataFrame, va: pd.DataFrame, gold: pd.DataFrame,
         print(f"  fold{fold} ep{epoch}  loss {total/len(tr_dl):.4f}  "
               f"OOF {val_auc:.3f}  gold {gold_auc:.3f}  ({time.time()-t0:.0f}s)")
 
+        if args.avg_top > 1:
+            core = model.module if isinstance(model, torch.nn.DataParallel) else model
+            kept.append((val_auc, epoch,
+                         {k: v.detach().cpu().clone() for k, v in core.state_dict().items()}))
+            kept = sorted(kept, key=lambda t: -t[0])[:args.avg_top]
+
         if val_auc > best:
             best = val_auc
             best_oof = pd.DataFrame(vp, columns=LABELS)
@@ -739,6 +750,37 @@ def train_fold(args, tr: pd.DataFrame, va: pd.DataFrame, gold: pd.DataFrame,
                         "per_label": val_per, "gold_per_label": gold_per,
                         "args": vars(args), "cache_manifest": _cache_manifest(args.cache)},
                        Path(args.out) / f"fold{fold}.pt")
+
+    if args.avg_top > 1 and len(kept) > 1:
+        # Average the best epochs' weights, then MEASURE the average rather than
+        # assume it: the saved checkpoint, its OOF and its gold AUC all describe
+        # the averaged model. Costs nothing at inference, unlike averaging the
+        # predictions of several checkpoints.
+        core = model.module if isinstance(model, torch.nn.DataParallel) else model
+        avg = {}
+        for k, v0 in kept[0][2].items():
+            if v0.is_floating_point():
+                avg[k] = sum(st[k] for _, _, st in kept) / len(kept)
+            else:
+                avg[k] = v0
+        core.load_state_dict(avg)
+        vp, vy = evaluate(model, va_dl, be, tta=args.eval_tta)
+        val_auc, val_per = macro_auc((vy > 0.5).astype(int), vp)
+        gp, gy = evaluate(model, gold_dl, be)
+        gold_auc, gold_per = macro_auc(gy.astype(int), gp)
+        eps = [e for _, e, _ in kept]
+        print(f"  fold{fold} AVERAGE of epochs {eps}: OOF {val_auc:.3f}  gold {gold_auc:.3f}  "
+              f"(best single: OOF {best:.3f})")
+        best = val_auc
+        best_oof = pd.DataFrame(vp, columns=LABELS)
+        best_oof.insert(0, ID_COL, va[ID_COL].values)
+        best_oof["fold"] = fold
+        torch.save({"model": core.state_dict(), "fold": fold,
+                    "oof_auc": val_auc, "gold_auc": gold_auc,
+                    "per_label": val_per, "gold_per_label": gold_per,
+                    "averaged_epochs": eps,
+                    "args": vars(args), "cache_manifest": _cache_manifest(args.cache)},
+                   Path(args.out) / f"fold{fold}.pt")
     return best, best_oof
 
 
@@ -798,7 +840,7 @@ def main() -> None:
     ap.add_argument("--n-slices", type=int, default=9)
     ap.add_argument("--size", type=int, default=256)
     ap.add_argument("--head", default="slot",
-                    choices=["slot", "slotpos", "shared", "topk"],
+                    choices=["slot", "slotpos", "shared", "topk", "gru"],
                     help="slot: one attention query per diagnosis over sequence types; "
                          "shared: a single attention for all twelve labels")
     ap.add_argument("--pool", default="focal", choices=["focal", "gap"],
@@ -818,6 +860,15 @@ def main() -> None:
     ap.add_argument("--sharpen-k", type=float, default=8.0,
                     help="logistic steepness; higher is closer to hard 0/1 labels")
     ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--no-aug", dest="augment", action="store_false",
+                    help="switch off the rigid jitter and intensity scale in training")
+    ap.add_argument("--sample-groups", type=int, default=0, metavar="K",
+                    help="train on K random three-slice groups per study per epoch, "
+                         "in stack order; evaluation sees all. Needs a head that "
+                         "takes a variable group count: shared, topk or gru")
+    ap.add_argument("--avg-top", type=int, default=1, metavar="K",
+                    help="save the average of the K best epochs' weights (by OOF) "
+                         "instead of the single best; 1 keeps the old behaviour")
     args = ap.parse_args()
     be = Backend(args.device)
 

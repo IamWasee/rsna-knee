@@ -217,6 +217,9 @@ class AttentionPool(nn.Module):
         return (a * x).sum(dim=1), a.squeeze(-1)
 
 
+SEQ_HIDDEN = 256
+
+
 class KneeModel(nn.Module):
     def __init__(self, backbone: str = "resnet34", labels: list[str] | None = None,
                  pretrained: bool = True, dropout: float = 0.3,
@@ -277,6 +280,16 @@ class KneeModel(nn.Module):
                 self.pool = TopKPool(feat)
                 self.head = nn.Sequential(nn.Dropout(dropout),
                                           nn.Linear(self.pool.out_dim, len(labels)))
+            elif head == "gru":
+                # A bidirectional GRU over the slice groups, in stack order, before
+                # pooling: each group's feature then carries what lies above and
+                # below it. The 2024 RSNA lumbar-spine winners' common recipe was a
+                # small 2D encoder per slice, an LSTM/GRU across slices, then
+                # attention pooling; ours pooled groups with no context at all.
+                self.seq = nn.GRU(feat, SEQ_HIDDEN, batch_first=True, bidirectional=True)
+                self.pool = AttentionPool(2 * SEQ_HIDDEN)
+                self.head = nn.Sequential(nn.Dropout(dropout),
+                                          nn.Linear(2 * SEQ_HIDDEN, len(labels)))
             else:
                 self.pool = AttentionPool(feat)   # name kept: old checkpoints load
                 self.head = nn.Sequential(nn.Dropout(dropout),
@@ -329,6 +342,11 @@ class KneeModel(nn.Module):
             # medial to lateral. The head gets a position embedding per group.
             logits, attn = self.head(feats)
         else:
+            if self.head_kind == "gru":
+                # GRU runs in float32: cuDNN's half-precision RNN path is not
+                # guaranteed under autocast, and this is a small layer.
+                with torch.autocast(device_type=feats.device.type, enabled=False):
+                    feats, _ = self.seq(feats.float())
             pooled, attn = self.pool(feats)
             logits = self.head(pooled)
         return (logits, attn) if return_attention else logits
