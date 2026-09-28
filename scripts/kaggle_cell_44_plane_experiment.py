@@ -3,8 +3,11 @@
 #
 # The reusable harness for every single-change test from here on. It trains
 # the 16-epoch --sharpen-to source recipe (the arms behind 0.909/0.910) with ONE
-# change, seed 42 kept so it shares its random draws with the baseline, and
-# compares gold-58 fold by fold against the seed-42 arm's exact checkpoints.
+# change and seed 42, and compares gold-58 fold by fold against the seed-42 arm's
+# exact checkpoints. Same seed does NOT mean shared random draws once the change
+# alters how the model is built: a different head consumes the RNG differently,
+# so batch order and augmentation diverge from epoch 0 and the pair behaves like
+# two seeds. That is exactly what the bars below were measured on.
 #
 #   --sub PLANE=ax             sag | cor | ax
 #   --sub TAG=slotpos          names the output, plane_<TAG>_<plane>
@@ -12,10 +15,11 @@
 #   --sub LABELFILE=llm_labels_v4_blend.csv   or another attached label table
 #   --sub FOLDS=all            all | 0   (fold 0 alone: ~1/5 the cost, coarser)
 #
-# Bars, fixed in advance from the measured seed noise (2026-09-27): a five-fold
-# paired mean must clear +0.013; a single fold, whose paired SD is ~0.008 per
-# fold, must clear +0.016. Both runs share seed 42, so real noise is below
-# these -- a result inside the bar means "can't tell", not "no effect".
+# Bar, fixed in advance from the measured seed noise (2026-09-27): a five-fold
+# paired mean must clear +0.013. FOLDS=0 is a SCREEN, not a verdict: one fold's
+# gap carries that fold's own studies, and on this project a fold-0 gap of +0.03
+# has shrunk to +0.003 at five folds. A fold-0 pass means "confirm at five
+# folds"; nothing is kept or killed on fold 0 alone.
 #
 # Attach: competition, cache-<plane>, <plane>-16ep-source, the label table's
 # dataset, dinov2. GPU, internet on.
@@ -26,6 +30,7 @@ EXTRA = "__EXTRA__".split()
 LABELFILE = "__LABELFILE__"
 FOLDS = "__FOLDS__"
 SLOT = {"sag": 0, "cor": 1, "ax": 2}[PLANE]
+assert FOLDS in ("all", "0"), f"FOLDS must be 'all' or '0', got {FOLDS!r}"
 BAR = 0.013 if FOLDS == "all" else 0.016
 !pip install -q timm transformers
 
@@ -103,7 +108,7 @@ from config import LABELS
 new, new_pl = {}, {}
 for p in sorted(glob.glob(f"{OUT}/fold*.pt")):
     ck = torch.load(p, map_location="cpu", weights_only=False)
-    f = int(_re.search(r"fold(\d)", p).group(1))
+    f = int(_re.search(r"fold(\d)\.pt$", p).group(1))
     new[f], new_pl[f] = float(ck["gold_auc"]), ck.get("gold_per_label") or {}
     print(f"  fold{f}  gold {new[f]:.4f}   OOF {ck['oof_auc']:.3f} (on this run's own targets)")
 want = [0, 1, 2, 3, 4] if FOLDS == "all" else [0]
@@ -131,7 +136,10 @@ if all(base_pl.get(f) and new_pl.get(f) for f in want):
         v = [new_pl[f].get(c, np.nan) - base_pl[f].get(c, np.nan) for f in want]
         print(f"    {c:<17}{np.nanmean(v):+.3f}")
 print()
-if np.mean(d) >= BAR:
+if FOLDS == "0":
+    print(f"FOLD-0 SCREEN: {'passes' if np.mean(d) >= BAR else 'does not pass'} "
+          f"the +{BAR} screen. Confirm at five folds before keeping or dropping it.")
+elif np.mean(d) >= BAR:
     print(f"CLEARS the +{BAR} bar.")
 elif np.mean(d) > -BAR:
     print(f"Inside +/-{BAR}: can't tell from noise.")
