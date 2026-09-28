@@ -567,6 +567,13 @@ def train_fold(args, tr: pd.DataFrame, va: pd.DataFrame, gold: pd.DataFrame,
                  n_slices=args.n_slices, size=args.size)
     dl_kw = dict(num_workers=args.workers, pin_memory=(be.kind == "cuda"))
 
+    if args.sample_groups and (args.sample_groups < 2 or args.slots != 1):
+        # Sampling is joint across the flattened groups: with several sequences it
+        # can drop one entirely (K=6 of 12 loses a whole slot ~9% of the time) while
+        # its labels stay -- MCL read only on coronal, say. K=1 leaves the GRU's
+        # recurrence and the pooling with no gradient.
+        raise SystemExit(f"--sample-groups needs --slots 1 and K >= 2 "
+                         f"(got slots={args.slots}, K={args.sample_groups})")
     if args.sample_groups and args.head not in ("shared", "topk", "gru"):
         raise SystemExit(f"--sample-groups needs a head that accepts a variable number "
                          f"of groups (shared, topk, gru); --head {args.head} fixes it")
