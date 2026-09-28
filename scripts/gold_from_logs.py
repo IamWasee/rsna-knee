@@ -32,13 +32,16 @@ def arms(path):
             continue
         seen.add(m.group(0))
         rows.append(tuple(map(float, m.groups())))
-    out, cur, last = [], [], -1
-    for r in rows:                    # a new arm starts when the fold index drops
-        if r[0] < last:
+    # A new arm starts when the fold index drops, or when the epoch index drops
+    # within the same fold -- the second case is how single-fold bake-offs
+    # (every arm trains fold 0 only) separate; the first rule alone merged them.
+    out, cur, last = [], [], (-1, -1)
+    for r in rows:
+        if r[0] < last[0] or (r[0] == last[0] and r[1] < last[1]):
             out.append(cur)
             cur = []
         cur.append(r)
-        last = r[0]
+        last = (r[0], r[1])
     if cur:
         out.append(cur)
     res = []
