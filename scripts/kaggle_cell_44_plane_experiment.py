@@ -14,6 +14,10 @@
 #   --sub EXTRA="--head slotpos"   the one change, as train.py flags
 #   --sub LABELFILE=llm_labels_v4_blend.csv   or another attached label table
 #   --sub FOLDS=all            all | 0   (fold 0 alone: ~1/5 the cost, coarser)
+#   --sub MAXMIN=330           training ceiling, minutes. Keep it under the GPU
+#                              quota left: if the quota runs out first, Kaggle
+#                              kills the session and every output goes with it,
+#                              where this ceiling keeps the folds already done.
 #
 # Bar, fixed in advance from the measured seed noise (2026-09-27): a five-fold
 # paired mean must clear +0.013. FOLDS=0 is a SCREEN, not a verdict: one fold's
@@ -35,6 +39,7 @@ TAG = "__TAG__"
 EXTRA = "__EXTRA__".split()
 LABELFILE = "__LABELFILE__"
 FOLDS = "__FOLDS__"
+MAXMIN = int("__MAXMIN__")
 SLOT = {"sag": 0, "cor": 1, "ax": 2}[PLANE]
 assert FOLDS in ("all", "0"), f"FOLDS must be 'all' or '0', got {FOLDS!r}"
 BAR = 0.013 if FOLDS == "all" else 0.016
@@ -109,7 +114,7 @@ t0 = time.time()
 run(["--dry-run", "20", "--max-minutes", str(CEILING), "--out", "/kaggle/working/rehearse"],
     "rehearsal", 20)
 OUT = f"/kaggle/working/plane_{TAG}_{PLANE}"
-run(["--out", OUT], f"{PLANE}: {TAG}, folds={FOLDS}", CEILING)
+run(["--out", OUT], f"{PLANE}: {TAG}, folds={FOLDS}", min(CEILING, MAXMIN))
 print(f"\nelapsed {(time.time()-t0)/60:.0f} min")
 
 # ------------------------------------------------------------- the verdict
