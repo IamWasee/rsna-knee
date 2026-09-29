@@ -706,6 +706,7 @@ def train_fold(args, tr: pd.DataFrame, va: pd.DataFrame, gold: pd.DataFrame,
         return float("nan"), None
 
     best, best_oof = -1.0, None
+    single = {}   # the best single epoch's scores, carried into an averaged checkpoint
     kept: list[tuple[float, int, dict]] = []   # (val_auc, epoch, cpu state) for --avg-top
     for epoch in range(args.epochs):
         model.train()
@@ -752,6 +753,8 @@ def train_fold(args, tr: pd.DataFrame, va: pd.DataFrame, gold: pd.DataFrame,
             print("    per-label OOF: " + "  ".join(
                 f"{c.split()[0][:4]} {val_per[c]:.2f}" for c in LABELS))
             core = model.module if isinstance(model, torch.nn.DataParallel) else model
+            single = {"single_epoch": epoch, "single_oof_auc": val_auc,
+                      "single_gold_auc": gold_auc, "single_gold_per_label": gold_per}
             torch.save({"model": core.state_dict(), "fold": fold,
                         "oof_auc": val_auc, "gold_auc": gold_auc,
                         "per_label": val_per, "gold_per_label": gold_per,
@@ -763,6 +766,15 @@ def train_fold(args, tr: pd.DataFrame, va: pd.DataFrame, gold: pd.DataFrame,
         # assume it: the saved checkpoint, its OOF and its gold AUC all describe
         # the averaged model. Costs nothing at inference, unlike averaging the
         # predictions of several checkpoints.
+        #
+        # The best single epoch is kept beside it, renamed so that nothing loads
+        # it by accident -- infer.py and the submission cell take every *.pt in
+        # an arm's folder. Its scores ride in the averaged checkpoint too, so one
+        # run judges both the change under test and the averaging, and training is
+        # untouched by --avg-top (copying weights draws no random numbers).
+        best_pt = Path(args.out) / f"fold{fold}.pt"
+        if best_pt.exists():
+            best_pt.replace(best_pt.with_name(f"fold{fold}_single.ckpt"))
         core = model.module if isinstance(model, torch.nn.DataParallel) else model
         avg = {}
         for k, v0 in kept[0][2].items():
@@ -785,7 +797,7 @@ def train_fold(args, tr: pd.DataFrame, va: pd.DataFrame, gold: pd.DataFrame,
         torch.save({"model": core.state_dict(), "fold": fold,
                     "oof_auc": val_auc, "gold_auc": gold_auc,
                     "per_label": val_per, "gold_per_label": gold_per,
-                    "averaged_epochs": eps,
+                    "averaged_epochs": eps, **single,
                     "args": vars(args), "cache_manifest": _cache_manifest(args.cache)},
                    Path(args.out) / f"fold{fold}.pt")
     return best, best_oof

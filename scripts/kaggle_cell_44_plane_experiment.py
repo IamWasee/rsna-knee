@@ -21,6 +21,12 @@
 # has shrunk to +0.003 at five folds. A fold-0 pass means "confirm at five
 # folds"; nothing is kept or killed on fold 0 alone.
 #
+# Every run also carries --avg-top 3, which leaves training untouched (copying
+# weights draws no random numbers) and saves the average of the three best
+# epochs beside the best single one. The verdict above is on the single epoch,
+# like for like with the baseline; the averaging is judged separately, inside
+# the run, where no seed noise separates the two models.
+#
 # Attach: competition, cache-<plane>, <plane>-16ep-source, the label table's
 # dataset, dinov2. GPU, internet on.
 # ============================================================
@@ -72,7 +78,8 @@ COMMON = ["--cache", cache, "--labels", lab[0], "--backbone", f"dinov2:{dino[0]}
           "--size", SIZE, "--slots", "1", "--n-slices", NSL, "--folds", "5",
           "--head", "shared", "--pool", "focal", "--batch", "8", "--epochs", "16",
           "--lr", "1e-3", "--lr-backbone", "8e-6", "--unfreeze-last", "6",
-          "--weight-decay", "0.02", "--sharpen-to", "source", "--seed", "42"] + EXTRA \
+          "--weight-decay", "0.02", "--sharpen-to", "source", "--seed", "42",
+          "--avg-top", "3"] + EXTRA \
          + (["--only-fold", "0"] if FOLDS == "0" else [])
 
 def run(extra, label, ceiling):
@@ -93,11 +100,16 @@ def run(extra, label, ceiling):
     if code != 0:
         raise SystemExit(f"{label} exited {code}")
 
+# The rehearsal projects high: 264 and 270 min projected, 218 and 210 min run
+# (ax-16ep-severity, ax-slotpos). Four timed steps were also noisy enough to
+# read 0.41 s/step on the same recipe and refuse ax-pseudo50 at 300 against
+# 300. Twenty steps, and a budget equal to the training ceiling it guards.
+CEILING = 330 if FOLDS == "all" else 100
 t0 = time.time()
-run(["--dry-run", "4", "--max-minutes", "300" if FOLDS == "all" else "80", "--out", "/kaggle/working/rehearse"],
+run(["--dry-run", "20", "--max-minutes", str(CEILING), "--out", "/kaggle/working/rehearse"],
     "rehearsal", 20)
 OUT = f"/kaggle/working/plane_{TAG}_{PLANE}"
-run(["--out", OUT], f"{PLANE}: {TAG}, folds={FOLDS}", 330 if FOLDS == "all" else 100)
+run(["--out", OUT], f"{PLANE}: {TAG}, folds={FOLDS}", CEILING)
 print(f"\nelapsed {(time.time()-t0)/60:.0f} min")
 
 # ------------------------------------------------------------- the verdict
@@ -105,12 +117,19 @@ print(f"\nelapsed {(time.time()-t0)/60:.0f} min")
 import numpy as np, torch, re as _re
 sys.path.insert(0, f"{CODE}/src")
 from config import LABELS
-new, new_pl = {}, {}
+new, new_pl, avg, avg_pl = {}, {}, {}, {}
 for p in sorted(glob.glob(f"{OUT}/fold*.pt")):
     ck = torch.load(p, map_location="cpu", weights_only=False)
     f = int(_re.search(r"fold(\d)\.pt$", p).group(1))
-    new[f], new_pl[f] = float(ck["gold_auc"]), ck.get("gold_per_label") or {}
-    print(f"  fold{f}  gold {new[f]:.4f}   OOF {ck['oof_auc']:.3f} (on this run's own targets)")
+    if "averaged_epochs" in ck:
+        new[f], new_pl[f] = float(ck["single_gold_auc"]), ck["single_gold_per_label"] or {}
+        avg[f], avg_pl[f] = float(ck["gold_auc"]), ck.get("gold_per_label") or {}
+        print(f"  fold{f}  gold {new[f]:.4f} single epoch {ck['single_epoch']}, "
+              f"{avg[f]:.4f} averaged {ck['averaged_epochs']}   "
+              f"OOF {ck['single_oof_auc']:.3f} / {ck['oof_auc']:.3f} (this run's own targets)")
+    else:
+        new[f], new_pl[f] = float(ck["gold_auc"]), ck.get("gold_per_label") or {}
+        print(f"  fold{f}  gold {new[f]:.4f}   OOF {ck['oof_auc']:.3f} (on this run's own targets)")
 want = [0, 1, 2, 3, 4] if FOLDS == "all" else [0]
 if sorted(new) != want:
     raise SystemExit(f"expected folds {want}, got {sorted(new)}")
@@ -120,8 +139,9 @@ for p in find(suffix=".pt"):
         m = _re.search(r"fold(\d)\.pt$", p)
         if m and int(m.group(1)) in want:
             ck = torch.load(p, map_location="cpu", weights_only=False)
-            base[int(m.group(1))] = float(ck["gold_auc"])
-            base_pl[int(m.group(1))] = ck.get("gold_per_label") or {}
+            # an averaged arm carries its single epoch too; compare like with like
+            base[int(m.group(1))] = float(ck.get("single_gold_auc", ck["gold_auc"]))
+            base_pl[int(m.group(1))] = ck.get("single_gold_per_label", ck.get("gold_per_label")) or {}
 if sorted(base) != want:
     raise SystemExit(f"seed-42 baseline checkpoints for {PLANE} not attached ({sorted(base)})")
 d = [new[f] - base[f] for f in want]
@@ -145,3 +165,17 @@ elif np.mean(d) > -BAR:
     print(f"Inside +/-{BAR}: can't tell from noise.")
 else:
     print(f"WORSE by more than {BAR}.")
+
+# ------------------------------------------ the averaging, judged inside the run
+if sorted(avg) == want:
+    a = [avg[f] - new[f] for f in want]
+    print("\n" + "=" * 70)
+    print("weight averaging (--avg-top 3), same run, same training")
+    print("  single    " + "  ".join(f"{new[f]:.4f}" for f in want) + f"   mean {np.mean([new[f] for f in want]):.4f}")
+    print("  averaged  " + "  ".join(f"{avg[f]:.4f}" for f in want) + f"   mean {np.mean([avg[f] for f in want]):.4f}")
+    print("  paired    " + "  ".join(f"{x:+.4f}" for x in a) + f"   mean {np.mean(a):+.4f}")
+    print(f"  averaged vs baseline: mean {np.mean([avg[f] - base[f] for f in want]):+.4f}")
+    print("  No seed noise separates these two models, but the 58 are few and which epochs\n"
+          "  get averaged turns on OOF ties. Rule, fixed 2026-09-29 before any result: keep\n"
+          "  averaging only if two five-fold runs each show mean >= +0.003 and at least\n"
+          "  7 of their 10 folds are positive.")
