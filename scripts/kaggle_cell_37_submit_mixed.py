@@ -70,9 +70,14 @@ KEEP = {
 import torch
 arms, layouts = {}, {}
 skipped = set()
-for p in sorted(find(suffix=".pt")):
+# An arm trained with --avg-top saves the averaged model as fold<k>.pt and its
+# best single epoch as fold<k>_single.ckpt. "<arm>#single" in KEEP selects the
+# latter; it is linked in as fold<k>.pt, the name infer.py globs for.
+for p in sorted(find(suffix=".pt") + find(suffix="_single.ckpt")):
     d = os.path.dirname(p)
     arm = f"{os.path.basename(d)}@{os.path.basename(os.path.dirname(d))}"
+    if p.endswith("_single.ckpt"):
+        arm += "#single"
     if KEEP and arm not in KEEP:
         skipped.add(arm)
         continue
@@ -94,7 +99,9 @@ for p in sorted(find(suffix=".pt")):
                                       "group", "n_slices", "band", "laterality",
                                       "slot_scheme", "only_slot")},
         sort_keys=True).encode()).hexdigest()[:8]
-    a = arms.setdefault(arm, {"layout": key, "dir": f"/kaggle/working/arms/{arm}"})
+    # "#" stays out of paths: the shell and URLs both give it a meaning
+    safe = arm.replace("#", "__")
+    a = arms.setdefault(arm, {"layout": key, "dir": f"/kaggle/working/arms/{safe}"})
     if a["layout"] != key:
         raise SystemExit(f"{arm} mixes checkpoints from two different caches")
     layouts.setdefault(key, man)
@@ -102,7 +109,7 @@ for p in sorted(find(suffix=".pt")):
     # symlink, not copy: infer.py globs *.pt and follows links, and copying
     # every fold of every arm spends several GB of a 20 GB working quota to
     # duplicate files that are already mounted.
-    link = f"{a['dir']}/{os.path.basename(p)}"
+    link = f"{a['dir']}/{os.path.basename(p).replace('_single.ckpt', '.pt')}"
     if not os.path.exists(link):
         os.symlink(p, link)
 
@@ -143,7 +150,7 @@ subs = []
 for arm, a in sorted(arms.items()):
     cache = f"/kaggle/working/test_{a['layout']}"
     wdir = a["dir"]
-    out = f"/kaggle/working/parts/{arm.replace('@','_')}.csv"
+    out = f"/kaggle/working/parts/{arm.replace('@','_').replace('#','__')}.csv"
     print("\n" + "-" * 66 + f"\n{arm}: infer\n" + "-" * 66, flush=True)
     !python $SRC/infer.py --cache $cache --weights $wdir --out $out
     if not os.path.exists(out):
