@@ -53,6 +53,7 @@ ARMS = {  # arm (<output dir>@<notebook>) -> plane
     "plane_s16s43_cor@cor-16ep-seed43": "cor",
     "plane_s16s43_ax@ax-16ep-seed43": "ax",
     "plane_pseudo50_ax@ax-pseudo50": "ax",
+    "plane_pseudo50_cor@cor-pseudo50": "cor",
     "plane_slotpos_ax@ax-slotpos": "ax",
     "plane_slotpos_sag@sag-slotpos": "sag",
 }
@@ -66,7 +67,16 @@ BLENDS = {
                                        + ["plane_pseudo50_ax@ax-pseudo50"],
     "6 + both slotpos": SIX + ["plane_slotpos_ax@ax-slotpos",
                                "plane_slotpos_sag@sag-slotpos"],
+    "6 + ax & cor pseudo50#single": SIX + ["plane_pseudo50_ax@ax-pseudo50#single",
+                                           "plane_pseudo50_cor@cor-pseudo50#single"],
 }
+# --sub ONLY=<arm>,<arm> scores just those arms (each with its #single); empty
+# scores all. Blends a run cannot complete are skipped here and recomputed
+# offline from the saved predictions of every run.
+ONLY = [a for a in "__ONLY__".split(",") if a]
+assert all(a in ARMS for a in ONLY), f"unknown arm in ONLY: {ONLY}"
+if ONLY:
+    ARMS = {a: ARMS[a] for a in ONLY}
 
 train = pd.read_csv(data_root() / "train.csv")
 gold = train[train[LABELS].notna().all(axis=1)].reset_index(drop=True)
@@ -121,7 +131,8 @@ for arm in sorted(dirs):
                      slots=man["slots"], n_slices=man["n_slices"], size=man["size"])
     per_model, ids = predict(models, DataLoader(ds, batch_size=8, num_workers=2), device)
     assert list(ids) == list(gold[ID_COL]), f"{arm}: study order changed"
-    np.save(OUT / f"{arm}.npy", per_model)             # (folds, 58, 12)
+    # "#" starts a URL fragment: kaggle kernels output fetched those files empty
+    np.save(OUT / f"{arm.replace('#', '__')}.npy", per_model)   # (folds, 58, 12)
     # load_models took the folder's *.pt in sorted order; re-read their records
     rec = [float(torch.load(f, map_location="cpu", weights_only=False)["gold_auc"])
            for f in sorted(Path(dirs[arm]).glob("*.pt"))]
