@@ -1,11 +1,21 @@
 # ============================================================
 # RSNA Knee — SUBMISSION, weighted per ARM. Internet OFF.
 #
-# Six arms: the three that scored 0.909, plus the same recipe retrained on a
-# second seed. One per plane per seed, each 16 epochs with --sharpen-to source.
+# Seven arms: the six that scored 0.910, plus the axial arm trained on the
+# 50/50 mix of report labels and the six arms' out-of-fold predictions
+# (src/pseudo_labels.py), as its single best epoch per fold.
 #
 #   plane_s16_{sag,cor,ax}@{plane}-16ep-source       seed 42   (the 0.909 set)
-#   plane_s16s43_{sag,cor,ax}@{plane}-16ep-seed43    seed 43
+#   plane_s16s43_{sag,cor,ax}@{plane}-16ep-seed43    seed 43   (-> 0.910)
+#   plane_pseudo50_ax@ax-pseudo50#single             pseudo-labels, seed 42
+#
+# 2026-09-30, cell 45 (every arm and blend on the gold 58, bootstrap over the
+# 58 studies). Chosen in advance with the critic, before these numbers:
+#   6 arms (LB 0.910)                 0.8944
+#   6 + ax-pseudo50#single            0.8980   +0.0036, P(gain) 0.89
+# Not this time: 6 + cor-pseudo50#single 0.8936 (-0.0008, P 0.38), although the
+# arm alone is +0.0169 on gold -- it held what the blend already knew. It waits
+# for a plane-balanced set once sagittal has its pseudo-label arm.
 #
 # Gold-58 per arm, exact from the checkpoints:
 #            seed 42   seed 43
@@ -31,7 +41,7 @@
 # showed.)
 #
 # Attach: competition, abdullahwasee/rsna-knee-src, {sag,cor,ax}-16ep-source,
-#         {sag,cor,ax}-16ep-seed43, metaresearch/dinov2.
+#         {sag,cor,ax}-16ep-seed43, ax-pseudo50, metaresearch/dinov2.
 #         GPU. INTERNET OFF.
 # ============================================================
 import sys, os, time, shutil, glob, json, hashlib
@@ -59,12 +69,13 @@ from kaggle_paths import find, describe
 # The arms, by name. Selecting on names rather than on whichever notebooks
 # happen to be mounted is what makes the submission the measured set: attach an
 # extra notebook and its arms are skipped, forget a needed one and the run stops
-# instead of quietly filing a subset. The header above says which six and why.
+# instead of quietly filing a subset. The header above says which seven and why.
 KEEP = {
     "plane_s16_sag@sag-16ep-source", "plane_s16_cor@cor-16ep-source",
     "plane_s16_ax@ax-16ep-source",
     "plane_s16s43_sag@sag-16ep-seed43", "plane_s16s43_cor@cor-16ep-seed43",
     "plane_s16s43_ax@ax-16ep-seed43",
+    "plane_pseudo50_ax@ax-pseudo50#single",
 }
 
 import torch
@@ -129,6 +140,11 @@ for arm, a in sorted(arms.items()):
     print(f"  {arm:<32} layout {a['layout']}  "
           f"{m.get('slots')}x{m.get('n_slices')} @ {m.get('size')}px "
           f"slot={m.get('only_slot')}  {len(os.listdir(a['dir']))} folds")
+# Every arm was measured as five fold models. A doubled or missing fold would
+# change the arm's vote without failing anywhere else.
+bad = {arm: len(os.listdir(a["dir"])) for arm, a in arms.items() if len(os.listdir(a["dir"])) != 5}
+if bad:
+    raise SystemExit(f"arms without exactly five fold checkpoints: {bad}")
 
 t0 = time.time()
 for key, m in layouts.items():
@@ -180,6 +196,5 @@ print(f"\nsubmission: {base.shape[0]} rows x {base.shape[1]} cols "
       f"from {len(frames)} arm(s)")
 print(base.head(3).to_string())
 print(f"\ntotal {(time.time()-t0)/60:.1f} min")
-print("\nSix arms: 16 epochs + source sharpening, one per plane per seed (42, 43).")
-print("Blend +0.0037 / +0.0036 over the 3-arm set that scored 0.909, on both")
-print("report-label yardsticks.")
+print("\nSeven arms: the six that scored 0.910 plus the axial pseudo-label arm")
+print("(single epoch). Gold-58 blend 0.8944 -> 0.8980.")
