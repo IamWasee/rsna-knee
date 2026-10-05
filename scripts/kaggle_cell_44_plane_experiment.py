@@ -14,10 +14,17 @@
 #   --sub EXTRA="--head slotpos"   the one change, as train.py flags
 #   --sub LABELFILE=llm_labels_v4_blend.csv   or another attached label table
 #   --sub FOLDS=all            all | 0   (fold 0 alone: ~1/5 the cost, coarser)
-#   --sub MAXMIN=330           training ceiling, minutes. Keep it under the GPU
-#                              quota left: if the quota runs out first, Kaggle
-#                              kills the session and every output goes with it,
-#                              where this ceiling keeps the folds already done.
+#   --sub MAXMIN=330           training ceiling AND rehearsal budget, minutes
+#                              (100 for FOLDS=0). Keep it under the GPU quota
+#                              left: if the quota runs out first, Kaggle kills
+#                              the session and every output goes with it, where
+#                              this ceiling keeps the folds already done. Raise
+#                              it deliberately for a slower change (more of the
+#                              encoder trained), never past the quota.
+#   --sub BASE=plane_s16       the arm to beat, by output folder: plane_s16 (the
+#                              16-epoch source arm, attach <plane>-16ep-source) or
+#                              plane_pseudo50 (attach <plane>-pseudo50). Once a
+#                              change wins, the next one is judged against it.
 #
 # Bar, fixed in advance from the measured seed noise (2026-09-27): a five-fold
 # paired mean must clear +0.013. FOLDS=0 is a SCREEN, not a verdict: one fold's
@@ -31,8 +38,8 @@
 # like for like with the baseline; the averaging is judged separately, inside
 # the run, where no seed noise separates the two models.
 #
-# Attach: competition, cache-<plane>, <plane>-16ep-source, the label table's
-# dataset, dinov2. GPU, internet on.
+# Attach: competition, cache-<plane>, the BASE arm's notebook, the label
+# table's dataset, dinov2. GPU, internet on.
 # ============================================================
 PLANE = "__PLANE__"
 TAG = "__TAG__"
@@ -40,6 +47,8 @@ EXTRA = "__EXTRA__".split()
 LABELFILE = "__LABELFILE__"
 FOLDS = "__FOLDS__"
 MAXMIN = int("__MAXMIN__")
+BASE = "__BASE__"
+assert BASE in ("plane_s16", "plane_pseudo50"), f"unknown BASE {BASE!r}"
 SLOT = {"sag": 0, "cor": 1, "ax": 2}[PLANE]
 assert FOLDS in ("all", "0"), f"FOLDS must be 'all' or '0', got {FOLDS!r}"
 BAR = 0.013 if FOLDS == "all" else 0.016
@@ -109,12 +118,12 @@ def run(extra, label, ceiling):
 # (ax-16ep-severity, ax-slotpos). Four timed steps were also noisy enough to
 # read 0.41 s/step on the same recipe and refuse ax-pseudo50 at 300 against
 # 300. Twenty steps, and a budget equal to the training ceiling it guards.
-CEILING = 330 if FOLDS == "all" else 100
+CEILING = MAXMIN
 t0 = time.time()
 run(["--dry-run", "20", "--max-minutes", str(CEILING), "--out", "/kaggle/working/rehearse"],
     "rehearsal", 20)
 OUT = f"/kaggle/working/plane_{TAG}_{PLANE}"
-run(["--out", OUT], f"{PLANE}: {TAG}, folds={FOLDS}", min(CEILING, MAXMIN))
+run(["--out", OUT], f"{PLANE}: {TAG}, folds={FOLDS}", CEILING)
 print(f"\nelapsed {(time.time()-t0)/60:.0f} min")
 
 # ------------------------------------------------------------- the verdict
@@ -140,18 +149,21 @@ if sorted(new) != want:
     raise SystemExit(f"expected folds {want}, got {sorted(new)}")
 base, base_pl = {}, {}
 for p in find(suffix=".pt"):
-    if f"/plane_s16_{PLANE}/" in p:
+    if f"/{BASE}_{PLANE}/" in p:
         m = _re.search(r"fold(\d)\.pt$", p)
         if m and int(m.group(1)) in want:
+            # two attached notebooks holding the same arm folder would let the
+            # last one found win silently
+            assert int(m.group(1)) not in base, f"two baselines for fold {m.group(1)}: {p}"
             ck = torch.load(p, map_location="cpu", weights_only=False)
             # an averaged arm carries its single epoch too; compare like with like
             base[int(m.group(1))] = float(ck.get("single_gold_auc", ck["gold_auc"]))
             base_pl[int(m.group(1))] = ck.get("single_gold_per_label", ck.get("gold_per_label")) or {}
 if sorted(base) != want:
-    raise SystemExit(f"seed-42 baseline checkpoints for {PLANE} not attached ({sorted(base)})")
+    raise SystemExit(f"baseline {BASE}_{PLANE} checkpoints not attached ({sorted(base)})")
 d = [new[f] - base[f] for f in want]
 print("\n" + "=" * 70)
-print(f"{PLANE}  {TAG}  ({' '.join(EXTRA) or 'no flag change'}; labels {LABELFILE})")
+print(f"{PLANE}  {TAG}  ({' '.join(EXTRA) or 'no flag change'}; labels {LABELFILE}; vs {BASE}_{PLANE})")
 print("  baseline  " + "  ".join(f"{base[f]:.4f}" for f in want) + f"   mean {np.mean([base[f] for f in want]):.4f}")
 print("  this      " + "  ".join(f"{new[f]:.4f}" for f in want) + f"   mean {np.mean([new[f] for f in want]):.4f}")
 print("  paired    " + "  ".join(f"{x:+.4f}" for x in d) + f"   mean {np.mean(d):+.4f}")
