@@ -1,37 +1,23 @@
 # ============================================================
 # RSNA Knee — SUBMISSION, weighted per ARM. Internet OFF.
 #
-# Seven arms: the six that scored 0.910, plus the axial arm trained on the
-# 50/50 mix of report labels and the six arms' out-of-fold predictions
-# (src/pseudo_labels.py), as its single best epoch per fold.
+# Nine arms, three per plane: the six that scored 0.910 plus a pseudo-label
+# arm per plane (src/pseudo_labels.py: 50/50 report labels and the six arms'
+# out-of-fold predictions), each as its single best epoch per fold.
 #
 #   plane_s16_{sag,cor,ax}@{plane}-16ep-source       seed 42   (the 0.909 set)
 #   plane_s16s43_{sag,cor,ax}@{plane}-16ep-seed43    seed 43   (-> 0.910)
-#   plane_pseudo50_ax@ax-pseudo50#single             pseudo-labels, seed 42
+#   plane_pseudo50_{sag,cor,ax}@{plane}-pseudo50#single  pseudo-labels
+#                                                    (ax alone added -> 0.912)
 #
-# 2026-09-30, cell 45 (every arm and blend on the gold 58, bootstrap over the
-# 58 studies). Chosen in advance with the critic, before these numbers:
-#   6 arms (LB 0.910)                 0.8944
-#   6 + ax-pseudo50#single            0.8980   +0.0036, P(gain) 0.89
-# Not this time: 6 + cor-pseudo50#single 0.8936 (-0.0008, P 0.38), although the
-# arm alone is +0.0169 on gold -- it held what the blend already knew. It waits
-# for a plane-balanced set once sagittal has its pseudo-label arm.
-#
-# Gold-58 per arm, exact from the checkpoints:
-#            seed 42   seed 43
-#   sag      0.8553    0.8648
-#   cor      0.8422    0.8372
-#   ax       0.8522    0.8533
-#
-# Rank-blended, on both report-label yardsticks:
-#                          gold-yard   source-yard
-#   3 arms, seed 42          0.8132      0.8407     <- scored 0.909
-#   3 arms, seed 43          0.8138      0.8405
-#   6 arms, both seeds       0.8169      0.8443     +0.0037 / +0.0036
-#
-# The second seed alone is no better than the first; the gain is from averaging
-# two independent draws of the same model, which cancels part of each one's
-# training noise. Equal weight per arm keeps each plane at a third of the vote.
+# Pseudo-label arms on gold, paired against their plane's seed-42 arm:
+#   ax +0.0187, cor +0.0169, sag +0.0144, every fold up in all three.
+# Blends on gold (cell 45, bootstrap over the 58), the 9 chosen in advance:
+#   7 arms (LB 0.912)                 0.8980
+#   9 arms, plane-balanced            0.8969   -0.0011, P(gain) 0.34
+# The pre-registered veto was P < 0.2, so it goes to the leaderboard, which
+# decides: keep if >= 0.912. Expect it near flat -- the cor and sag arms are
+# strong alone but hold much of what the blend already knows.
 #
 # The seed runs also measured that noise. The three planes' five-fold mean gold
 # differences between seeds were +0.0095, -0.0050, +0.0011: an SD of ~0.006, so
@@ -41,7 +27,7 @@
 # showed.)
 #
 # Attach: competition, abdullahwasee/rsna-knee-src, {sag,cor,ax}-16ep-source,
-#         {sag,cor,ax}-16ep-seed43, ax-pseudo50, metaresearch/dinov2.
+#         {sag,cor,ax}-16ep-seed43, {sag,cor,ax}-pseudo50, metaresearch/dinov2.
 #         GPU. INTERNET OFF.
 # ============================================================
 import sys, os, time, shutil, glob, json, hashlib
@@ -69,13 +55,15 @@ from kaggle_paths import find, describe
 # The arms, by name. Selecting on names rather than on whichever notebooks
 # happen to be mounted is what makes the submission the measured set: attach an
 # extra notebook and its arms are skipped, forget a needed one and the run stops
-# instead of quietly filing a subset. The header above says which seven and why.
+# instead of quietly filing a subset. The header above says which nine and why.
 KEEP = {
     "plane_s16_sag@sag-16ep-source", "plane_s16_cor@cor-16ep-source",
     "plane_s16_ax@ax-16ep-source",
     "plane_s16s43_sag@sag-16ep-seed43", "plane_s16s43_cor@cor-16ep-seed43",
     "plane_s16s43_ax@ax-16ep-seed43",
     "plane_pseudo50_ax@ax-pseudo50#single",
+    "plane_pseudo50_cor@cor-pseudo50#single",
+    "plane_pseudo50_sag@sag-pseudo50#single",
 }
 
 import torch
@@ -196,5 +184,5 @@ print(f"\nsubmission: {base.shape[0]} rows x {base.shape[1]} cols "
       f"from {len(frames)} arm(s)")
 print(base.head(3).to_string())
 print(f"\ntotal {(time.time()-t0)/60:.1f} min")
-print("\nSeven arms: the six that scored 0.910 plus the axial pseudo-label arm")
-print("(single epoch). Gold-58 blend 0.8944 -> 0.8980.")
+print("\nNine arms: the six that scored 0.910 plus a pseudo-label arm per plane")
+print("(single epoch). Gold-58 blend 0.8969 vs 0.8980 for the 0.912 seven.")
