@@ -55,6 +55,7 @@ ARMS = {  # arm (<output dir>@<notebook>) -> plane
     "plane_pseudo50_ax@ax-pseudo50": "ax",
     "plane_pseudo50_cor@cor-pseudo50": "cor",
     "plane_pseudo50_sag@sag-pseudo50": "sag",
+    "plane_combo_sag@sag-combo": "sag",
     "plane_slotpos_ax@ax-slotpos": "ax",
     "plane_slotpos_sag@sag-slotpos": "sag",
 }
