@@ -1,23 +1,22 @@
 # ============================================================
 # RSNA Knee — SUBMISSION, weighted per ARM. Internet OFF.
 #
-# Nine arms, three per plane: the six that scored 0.910 plus a pseudo-label
-# arm per plane (src/pseudo_labels.py: 50/50 report labels and the six arms'
-# out-of-fold predictions), each as its single best epoch per fold.
+# Nine arms, three per plane: the six that scored 0.910, the axial and coronal
+# pseudo-label arms (src/pseudo_labels.py), and for sagittal the new recipe --
+# pseudo-labels trained on raw soft targets (--sharpen-to none) with a 4x encoder
+# rate (--lr-backbone 3e-5). Every added arm as its single best epoch per fold.
 #
 #   plane_s16_{sag,cor,ax}@{plane}-16ep-source       seed 42   (the 0.909 set)
 #   plane_s16s43_{sag,cor,ax}@{plane}-16ep-seed43    seed 43   (-> 0.910)
-#   plane_pseudo50_{sag,cor,ax}@{plane}-pseudo50#single  pseudo-labels
-#                                                    (ax alone added -> 0.912)
+#   plane_pseudo50_{ax,cor}@{plane}-pseudo50#single  pseudo-labels (-> 0.912/0.913)
+#   plane_combo_sag@sag-combo#single                 pseudo-labels + new recipe
 #
-# Pseudo-label arms on gold, paired against their plane's seed-42 arm:
-#   ax +0.0187, cor +0.0169, sag +0.0144, every fold up in all three.
-# Blends on gold (cell 45, bootstrap over the 58), the 9 chosen in advance:
-#   7 arms (LB 0.912)                 0.8980
-#   9 arms, plane-balanced            0.8969   -0.0011, P(gain) 0.34
-# The pre-registered veto was P < 0.2, so it goes to the leaderboard, which
-# decides: keep if >= 0.912. Expect it near flat -- the cor and sag arms are
-# strong alone but hold much of what the blend already knows.
+# sag-combo vs sag-pseudo50 on gold, paired: +0.0176, all five folds up; alone
+# (folds rank-averaged) 0.8985, the first single arm at the blend's level.
+# Blends on gold (cell 45, bootstrap over the 58):
+#   9 arms with sag-pseudo50 (LB 0.913)   0.8969
+#   9 arms with sag-combo instead         0.9003   +0.0034, P(gain) 0.98
+# Keep if the public LB is >= 0.913.
 #
 # The seed runs also measured that noise. The three planes' five-fold mean gold
 # differences between seeds were +0.0095, -0.0050, +0.0011: an SD of ~0.006, so
@@ -27,7 +26,7 @@
 # showed.)
 #
 # Attach: competition, abdullahwasee/rsna-knee-src, {sag,cor,ax}-16ep-source,
-#         {sag,cor,ax}-16ep-seed43, {sag,cor,ax}-pseudo50, metaresearch/dinov2.
+#         {sag,cor,ax}-16ep-seed43, {ax,cor}-pseudo50, sag-combo, metaresearch/dinov2.
 #         GPU. INTERNET OFF.
 # ============================================================
 import sys, os, time, shutil, glob, json, hashlib
@@ -63,7 +62,7 @@ KEEP = {
     "plane_s16s43_ax@ax-16ep-seed43",
     "plane_pseudo50_ax@ax-pseudo50#single",
     "plane_pseudo50_cor@cor-pseudo50#single",
-    "plane_pseudo50_sag@sag-pseudo50#single",
+    "plane_combo_sag@sag-combo#single",
 }
 
 import torch
@@ -184,5 +183,5 @@ print(f"\nsubmission: {base.shape[0]} rows x {base.shape[1]} cols "
       f"from {len(frames)} arm(s)")
 print(base.head(3).to_string())
 print(f"\ntotal {(time.time()-t0)/60:.1f} min")
-print("\nNine arms: the six that scored 0.910 plus a pseudo-label arm per plane")
-print("(single epoch). Gold-58 blend 0.8969 vs 0.8980 for the 0.912 seven.")
+print("\nNine arms: the 0.910 six, ax/cor pseudo-label arms and sagittal on the new")
+print("recipe (single epochs). Gold-58 blend 0.9003 vs 0.8969 for the 0.913 nine.")
