@@ -33,6 +33,12 @@ from kaggle_paths import find, describe
 from config import ID_COL, LABELS
 import train as T
 
+# Which frozen encoder: of-l (OrthoFoundation-L, 1.25 M images), of-msk5m (the 5 M-image
+# OrthoFoundation-MSK checkpoint), dinov2-s (our own base model, the control).
+ENCODER = "__ENCODER__"
+assert ENCODER in ("of-l", "of-msk5m", "dinov2-s"), ENCODER
+WFILE = {"of-l": "OrthoFoundation-L.pth", "of-msk5m": "OrthoFoundation-MSK-5M.pth"}.get(ENCODER)
+
 t00 = time.time()
 # ---- inputs ------------------------------------------------------------
 caches = {}
@@ -44,7 +50,8 @@ for m in find(filename="cache_manifest.json"):
                 and man.get("slots") == 1 and p not in caches):
             caches[p] = d
 lab = find(filename="labels_pseudo50.csv")
-wts = find(filename="OrthoFoundation-L.pth")
+wts = find(filename=WFILE) if WFILE else [os.path.dirname(p) for p in find(filename="config.json")
+                                         if "dinov2" in p.lower() and "small" in p.lower()]
 if sorted(caches) != ["ax", "cor", "sag"] or not lab or not wts:
     describe(); raise SystemExit(f"need cache_{{sag,cor,ax}}, labels_pseudo50.csv, OrthoFoundation-L.pth: "
                                  f"{sorted(caches)} {lab} {wts}")
@@ -57,55 +64,62 @@ folds = list(GroupKFold(5).split(derived, groups=derived["_group"]))
 ids = list(derived[ID_COL]) + list(gold[ID_COL])
 print(f"{len(derived)} labelled studies, {len(gold)} gold, {(time.time()-t00)/60:.1f} min")
 
-# ---- encoder -----------------------------------------------------------
-REPO = "/kaggle/working/dinov3"
-!rm -rf $REPO && git clone -q https://github.com/facebookresearch/dinov3.git $REPO && git -C $REPO checkout -q 6876159
-sys.path.insert(0, REPO)
-from dinov3.hub.backbones import dinov3_vitl16      # not hubconf: it imports the detection/segmentation stacks
-enc = dinov3_vitl16(pretrained=False)
-ck = torch.load(wts[0], map_location="cpu", weights_only=False)
-print("checkpoint top-level keys:", list(ck)[:8] if isinstance(ck, dict) else type(ck))
-want = set(enc.state_dict())
+# ---- encoder ----------------------------------------------------------
+if ENCODER == "dinov2-s":
+    from transformers import AutoModel
+    enc = AutoModel.from_pretrained(wts[0]).float().eval().cuda()
+    D = enc.config.hidden_size * 2
+else:
+    REPO = "/kaggle/working/dinov3"
+    subprocess.run(f"rm -rf {REPO} && git clone -q https://github.com/facebookresearch/dinov3.git {REPO} "
+                   f"&& git -C {REPO} checkout -q 6876159", shell=True, check=True, timeout=600)
+    sys.path.insert(0, REPO)
+    from dinov3.hub.backbones import dinov3_vitl16      # not hubconf: it imports the detection/segmentation stacks
+    enc = dinov3_vitl16(pretrained=False)
+    ck = torch.load(wts[0], map_location="cpu", weights_only=False)
+    print("checkpoint top-level keys:", list(ck)[:8] if isinstance(ck, dict) else type(ck))
+    want = set(enc.state_dict())
 
 
-def candidates(obj, path=""):
-    """Every nested dict of tensors in the checkpoint, with its path."""
-    if isinstance(obj, dict):
-        if obj and all(torch.is_tensor(v) for v in obj.values()):
-            yield path, obj
-        for k, v in obj.items():
-            if isinstance(v, dict):
-                yield from candidates(v, f"{path}/{k}")
+    def candidates(obj, path=""):
+        """Every nested dict of tensors in the checkpoint, with its path."""
+        if isinstance(obj, dict):
+            if obj and all(torch.is_tensor(v) for v in obj.values()):
+                yield path, obj
+            for k, v in obj.items():
+                if isinstance(v, dict):
+                    yield from candidates(v, f"{path}/{k}")
 
 
-best, best_n = None, -1
-for path, sd in candidates(ck):
-    for pre in ("", "backbone.", "module.", "module.backbone.", "teacher.backbone.", "student.backbone.",
-                "teacher.", "student.", "encoder."):
-        m = {k[len(pre):]: v for k, v in sd.items() if k.startswith(pre)}
-        n = len(want & set(m))
-        if n > best_n:
-            best, best_n, how = m, n, f"{path or '/'} prefix '{pre}'"
-print(f"best match: {how}: {best_n}/{len(want)} encoder keys")
-if best_n < 0.95 * len(want):
-    print("unmatched examples:", sorted(want - set(best))[:10])
-    print("checkpoint examples:", sorted(best)[:10])
-    raise SystemExit("OrthoFoundation weights do not map onto dinov3_vitl16")
-missing, unexpected = enc.load_state_dict({k: v for k, v in best.items() if k in want}, strict=False)
-params = {n for n, _ in enc.named_parameters()}
-print(f"loaded; missing {len(missing)} {missing[:8]}")
-if set(missing) & params:
-    raise SystemExit(f"{len(set(missing) & params)} encoder PARAMETERS left at random init: "
-                     f"{sorted(set(missing) & params)[:10]}")
-left = sorted(k for k in best if k not in want and not k.startswith(("head", "dino_head", "ibot_head")))
-print(f"checkpoint keys not used: {len(left)} {left[:8]}")
-if any(k.startswith(("blocks.", "patch_embed", "norm", "cls_token", "storage_tokens", "rope")) for k in left):
-    raise SystemExit("backbone-looking checkpoint keys were not loaded")
-# fp32 weights + fp16 autocast: LayerNorm/softmax stay fp32 and the RoPE periods are not rounded
-enc = enc.float().eval().cuda()
+    best, best_n = None, -1
+    for path, sd in candidates(ck):
+        for pre in ("", "backbone.", "module.", "module.backbone.", "teacher.backbone.", "student.backbone.",
+                    "teacher.", "student.", "encoder."):
+            m = {k[len(pre):]: v for k, v in sd.items() if k.startswith(pre)}
+            n = len(want & set(m))
+            if n > best_n:
+                best, best_n, how = m, n, f"{path or '/'} prefix '{pre}'"
+    print(f"best match: {how}: {best_n}/{len(want)} encoder keys")
+    if best_n < 0.95 * len(want):
+        print("unmatched examples:", sorted(want - set(best))[:10])
+        print("checkpoint examples:", sorted(best)[:10])
+        raise SystemExit("OrthoFoundation weights do not map onto dinov3_vitl16")
+    missing, unexpected = enc.load_state_dict({k: v for k, v in best.items() if k in want}, strict=False)
+    params = {n for n, _ in enc.named_parameters()}
+    print(f"loaded; missing {len(missing)} {missing[:8]}")
+    if set(missing) & params:
+        raise SystemExit(f"{len(set(missing) & params)} encoder PARAMETERS left at random init: "
+                         f"{sorted(set(missing) & params)[:10]}")
+    left = sorted(k for k in best if k not in want and not k.startswith(("head", "dino_head", "ibot_head")))
+    print(f"checkpoint keys not used: {len(left)} {left[:8]}")
+    if any(k.startswith(("blocks.", "patch_embed", "norm", "cls_token", "storage_tokens", "rope")) for k in left):
+        raise SystemExit("backbone-looking checkpoint keys were not loaded")
+    # fp32 weights + fp16 autocast: LayerNorm/softmax stay fp32 and the RoPE periods are not rounded
+    enc = enc.float().eval().cuda()
+    D = 2048
 ngpu = torch.cuda.device_count()
 
-SIZE = 256          # 16 x 16 patches; the cache is 288 px
+SIZE = 252 if ENCODER == "dinov2-s" else 256    # whole patches: 18 x 14 / 16 x 16; cache is 288 px
 MEAN = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1).cuda()
 STD = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1).cuda()
 for p, d in caches.items():
@@ -118,6 +132,9 @@ class Wrap(nn.Module):
         super().__init__(); self.e = e
 
     def forward(self, x):
+        if ENCODER == "dinov2-s":
+            h = self.e(pixel_values=x).last_hidden_state
+            return torch.cat([h[:, 0], h[:, 1:].mean(1)], 1)
         o = self.e.forward_features(x)
         return torch.cat([o["x_norm_clstoken"], o["x_norm_patchtokens"].mean(1)], 1)
 
@@ -131,7 +148,7 @@ FEAT = Path("/kaggle/working/of_feats"); FEAT.mkdir(exist_ok=True)
 feats = {}
 for p in ("sag", "cor", "ax"):
     t0 = time.time()
-    out = np.zeros((len(ids), 24, 2048), np.float16)
+    out = np.zeros((len(ids), 24, D), np.float16)
     have = np.zeros(len(ids), bool)
     load = lambda i: np.load(f"{caches[p]}/{i}.npy") if os.path.exists(f"{caches[p]}/{i}.npy") else None
     B = 8   # studies per step = 192 slices
@@ -180,6 +197,8 @@ for alpha in (300.0, 3000.0, 30000.0):
     o, _ = T.macro_auc((Y > 0.5).astype(int), oof)
     g, gpl = gold_auc(gp)
     res[f"ridge_a{int(alpha)}"] = {"oof": o, "gold": g, "gold_per_label": gpl}
+    np.save(f"/kaggle/working/gold_ridge_a{int(alpha)}.npy", np.mean([pd.DataFrame(q).rank(pct=True).values for q in gp], 0))
+    np.save(f"/kaggle/working/oof_ridge_a{int(alpha)}.npy", oof)
     print(f"ridge alpha {alpha:>7.0f}: OOF {o:.4f}  gold {g:.4f}", flush=True)
 
 # ---- head 2: gated attention over slices, three planes -----------------
@@ -187,7 +206,7 @@ X = {p: torch.from_numpy(feats[p]) for p in ("sag", "cor", "ax")}
 
 
 class Head(nn.Module):
-    def __init__(self, d=2048, h=384):
+    def __init__(self, d=D, h=384):
         super().__init__()
         self.proj = nn.ModuleDict({p: nn.Sequential(nn.LayerNorm(d), nn.Linear(d, h), nn.GELU(), nn.Dropout(0.2))
                                    for p in X})
@@ -235,10 +254,14 @@ for k, (ti, vi) in enumerate(folds):
 o, _ = T.macro_auc((Y > 0.5).astype(int), oof)
 g, gpl = gold_auc(gp)
 res["attn"] = {"oof": o, "gold": g, "gold_per_label": gpl}
+np.save("/kaggle/working/gold_attn.npy", np.mean([pd.DataFrame(q).rank(pct=True).values for q in gp], 0))
+np.save("/kaggle/working/oof_attn.npy", oof)
+gold[[ID_COL]].to_csv("/kaggle/working/gold_ids.csv", index=False)
+derived[[ID_COL]].to_csv("/kaggle/working/oof_ids.csv", index=False)
 print(f"attention head: OOF {o:.4f}  gold {g:.4f}", flush=True)
 
 print("\n" + "=" * 66)
-print("OrthoFoundation-L, frozen, on gold-58 (folds rank-averaged):")
+print(f"{ENCODER}, frozen, on gold-58 (folds rank-averaged):")
 for k, v in res.items():
     print(f"  {k:<14} gold {v['gold']:.4f}   OOF {v['oof']:.4f}")
 print("ours for reference: sag-combo arm 0.8985 | 9-arm team 0.9003")
