@@ -34,7 +34,15 @@ for root, dirs, files in os.walk("/kaggle/input", followlinks=True):   # outputs
     if "receipt.json" in files:
         src.append(Path(root))
 src = [s for s in src if (s / "best.pt").is_file() and (s / "cloud_code").is_dir()]
-assert len(src) >= 1, "attach the snap-rsna-orthofoundation-fold0-epoch7-2026 output"
+if not src:
+    for root, dirs, files in os.walk("/kaggle/input", followlinks=True):
+        dirs[:] = [d for d in dirs if d not in ("competitions", "rsna-knee-abnormality-detection", "cloud_code")]
+        depth = root.count(os.sep) - 2
+        if depth > 7:
+            dirs[:] = []
+            continue
+        print("  " * depth + root, files[:5])
+    raise SystemExit("attach the snap-rsna-orthofoundation-fold0-epoch7-2026 output (tree above)")
 SRC = src[0]
 rec = json.loads((SRC / "receipt.json").read_text())
 print("checkpoint", SRC, {k: rec[k] for k in ("fold", "epoch_one_based", "weights", "validation_macro_auc_weak_reference")})
