@@ -532,7 +532,15 @@ def load_extra(args, derived: pd.DataFrame, gold: pd.DataFrame):
     miss = [c for c in [ID_COL] + LABELS if c not in ex.columns]
     if miss:
         raise SystemExit(f"{args.extra_labels} lacks columns {miss}")
+    # A blank target means the source never graded that finding (OAI's MOAKS has
+    # no MCL, fracture or contusion grade): zero weight, not "absent".
     ex = ex[[ID_COL] + LABELS].drop_duplicates(ID_COL)
+    blank = ex[LABELS].isna()
+    if blank.values.any():
+        for c in LABELS:
+            ex[f"{c}__conf"] = (~blank[c]).astype(float)
+        ex[LABELS] = ex[LABELS].fillna(0.5)
+        print(f"extra: {blank.values.mean():.1%} of target cells ungraded -> weight 0")
     clash = set(ex[ID_COL]) & (set(derived[ID_COL]) | set(gold[ID_COL]))
     if clash:
         raise SystemExit(f"{len(clash)} extra ids are also competition studies")

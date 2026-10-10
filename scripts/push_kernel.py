@@ -25,10 +25,11 @@ IMAGE = ("gcr.io/kaggle-private-byod/python@sha256:"
          "37c64f7dd9c54116ecd1bcc88817c5469b88387388fade02bfa8bf3fc647d461")
 
 
-def notebook(source: str) -> dict:
+def notebook(*sources: str) -> dict:
     return {
         "cells": [{"cell_type": "code", "execution_count": None,
-                   "metadata": {}, "outputs": [], "source": source.splitlines(True)}],
+                   "metadata": {}, "outputs": [], "source": s.splitlines(True)}
+                  for s in sources],
         "metadata": {"kernelspec": {"display_name": "Python 3", "language": "python",
                                     "name": "python3"},
                      "language_info": {"name": "python"}},
@@ -54,12 +55,24 @@ def main() -> None:
     ap.add_argument("--sub", action="append", default=[], metavar="KEY=VALUE",
                     help="replace __KEY__ in the driver before pushing, so one "
                          "file can serve several kernels")
+    ap.add_argument("--then", action="append", default=[], type=Path, metavar="PATH",
+                    help="append more cells after the driver, in order: a .py driver "
+                         "becomes one cell (same checks and --sub as the main one); a "
+                         ".ipynb contributes its code cells verbatim -- a public "
+                         "notebook run unchanged inside ours")
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
 
-    if not args.cell.exists():
-        raise SystemExit(f"no such driver: {args.cell}")
+    for p in [args.cell] + args.then:
+        if not p.exists():
+            raise SystemExit(f"no such driver: {p}")
+    drivers = [args.cell] + [p for p in args.then if p.suffix == ".py"]
+    for cell in drivers:
+        check_driver(cell, args)
+    push(args, drivers)
 
+
+def check_driver(cell: Path, args) -> None:
     # Refuse the one mistake this project keeps making. A recursive glob rooted at
     # /kaggle/input descends 24,371 DICOM series -- measured at 400+ seconds per
     # call -- and it has been written into five separate cells now, the last of
@@ -68,7 +81,7 @@ def main() -> None:
     # Comments are stripped first: this file and the cells both describe the
     # anti-pattern in prose, and a guard that fires on its own documentation is a
     # guard people switch off.
-    body = "\n".join(l for l in args.cell.read_text().splitlines()
+    body = "\n".join(l for l in cell.read_text().splitlines()
                      if not l.lstrip().startswith("#"))
     import re as _re
     bad = _re.search(r"glob\([^)]*/kaggle/input[^)]*\*\*", body) or (
@@ -83,18 +96,40 @@ def main() -> None:
                     or "curl" in l)]
         if net:
             raise SystemExit(
-                f"{args.cell.name} reaches the network, but --no-internet is set:\n"
+                f"{cell.name} reaches the network, but --no-internet is set:\n"
                 + "\n".join(f"    {l}" for l in net[:5])
                 + "\nA submission notebook has no network. Attach "
                   "abdullahwasee/rsna-knee-src and import from it."
             )
     if bad:
         raise SystemExit(
-            f"{args.cell.name} recursively globs /kaggle/input.\n"
+            f"{cell.name} recursively globs /kaggle/input.\n"
             "That walks the whole DICOM archive (400+ s per call).\n"
             "Use: from kaggle_paths import find, competition_file, describe"
         )
 
+    # Syntax-check the driver with the shell magics removed. A cell that does not
+    # parse costs a queue slot and however long Kaggle takes to reach it, and the
+    # `!cmd \` line-continuations mean a naive strip leaves dangling arguments.
+    lines, py = body.splitlines(), []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        if line.lstrip().startswith("!"):
+            while line.rstrip().endswith("\\") and i + 1 < len(lines):
+                i += 1
+                line = lines[i]
+        else:
+            py.append(line)
+        i += 1
+    try:
+        import ast as _ast
+        _ast.parse("\n".join(py))
+    except SyntaxError as e:
+        raise SystemExit(f"{cell.name} does not parse: line {e.lineno}: {e.msg}")
+
+
+def push(args, drivers) -> None:
     meta = {
         "id": f"{OWNER}/{args.slug}",
         "title": args.slug,
@@ -117,38 +152,27 @@ def main() -> None:
            else {"machine_shape": "NvidiaTeslaT4" if args.gpu else "None"}),
     }
 
-    # Syntax-check the driver with the shell magics removed. A cell that does not
-    # parse costs a queue slot and however long Kaggle takes to reach it, and the
-    # `!cmd \` line-continuations mean a naive strip leaves dangling arguments.
-    lines, py = body.splitlines(), []
-    i = 0
-    while i < len(lines):
-        line = lines[i]
-        if line.lstrip().startswith("!"):
-            while line.rstrip().endswith("\\") and i + 1 < len(lines):
-                i += 1
-                line = lines[i]
-        else:
-            py.append(line)
-        i += 1
-    try:
-        import ast as _ast
-        _ast.parse("\n".join(py))
-    except SyntaxError as e:
-        raise SystemExit(f"{args.cell.name} does not parse: line {e.lineno}: {e.msg}")
-
     with tempfile.TemporaryDirectory() as d:
         d = Path(d)
-        text = args.cell.read_text()
+        texts = {p: p.read_text() for p in drivers}
         for kv in args.sub:
             k, _, v = kv.partition("=")
-            if f"__{k}__" not in text:
-                raise SystemExit(f"{args.cell.name} has no placeholder __{k}__")
-            text = text.replace(f"__{k}__", v)
-        left = [w for w in text.split("__") if w.isupper() and w.isidentifier()]
-        if left:
-            raise SystemExit(f"unsubstituted placeholder(s): {sorted(set(left))}")
-        (d / f"{args.slug}.ipynb").write_text(json.dumps(notebook(text)))
+            if not any(f"__{k}__" in t for t in texts.values()):
+                raise SystemExit(f"no driver has placeholder __{k}__")
+            texts = {p: t.replace(f"__{k}__", v) for p, t in texts.items()}
+        for p, t in texts.items():
+            left = [w for w in t.split("__") if w.isupper() and w.isidentifier()]
+            if left:
+                raise SystemExit(f"{p.name}: unsubstituted placeholder(s): {sorted(set(left))}")
+        cells = []
+        for p in [args.cell] + args.then:
+            if p.suffix == ".ipynb":
+                nb = json.loads(p.read_text())
+                cells += ["".join(c["source"]) for c in nb["cells"] if c["cell_type"] == "code"]
+            else:
+                cells.append(texts[p])
+        (d / f"{args.slug}.ipynb").write_text(json.dumps(notebook(*cells)))
+        print(f"{len(cells)} cell(s): " + ", ".join(p.name for p in [args.cell] + args.then))
         (d / "kernel-metadata.json").write_text(json.dumps(meta, indent=2))
         print(json.dumps(meta, indent=2))
         if args.dry_run:
