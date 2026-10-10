@@ -75,12 +75,32 @@ if not (lab and dino):
     describe(); raise SystemExit(f"attach the dataset holding {LABELFILE}, and dinov2")
 
 cache = None
-for f in find(suffix=".npy"):
-    d = os.path.dirname(f)
-    if d.endswith(f"cache_{PLANE}"):
-        cache = d; break
+# Find caches by their manifests. fastMRI caches (cell 46) carry the same folder
+# names, so the split decides which is the competition's and which is extra data.
+fm_dirs = []
+for m in find(filename="cache_manifest.json"):
+    d = os.path.dirname(m)
+    if not d.endswith(f"cache_{PLANE}"):
+        continue
+    if json.load(open(m)).get("split") == "fastmri":
+        fm_dirs.append(d)
+    elif cache is None:
+        cache = d
 if cache is None:
     describe(); raise SystemExit(f"missing cache_{PLANE}")
+
+# EXTRA may carry FASTMRI:N -- train on the attached fastMRI caches for this plane
+# with the teacher's soft labels (cell 47's fastmri_teacher.csv), N per epoch.
+fm_tok = [e for e in EXTRA if e.startswith("FASTMRI:")]
+if fm_tok:
+    EXTRA = [e for e in EXTRA if not e.startswith("FASTMRI:")]
+    teach = find(filename="fastmri_teacher.csv")
+    if not (teach and fm_dirs):
+        describe(); raise SystemExit("FASTMRI: attach fastmri_teacher.csv (cell 47) and "
+                                     f"the fastMRI cache notebooks ({len(fm_dirs)} found)")
+    EXTRA += ["--extra-labels", teach[0], "--extra-cache", *fm_dirs,
+              "--extra-per-epoch", fm_tok[0].split(":", 1)[1]]
+    print(f"fastMRI: {len(fm_dirs)} cache dir(s), labels {teach[0]}")
 man = json.load(open(f"{cache}/cache_manifest.json"))
 if man.get("slots") != 1 or man.get("only_slot") != SLOT:
     raise SystemExit(f"cache_{PLANE} is not the one-sequence {PLANE} cache: {man}")
