@@ -23,7 +23,8 @@
 #                              encoder trained), never past the quota.
 #   --sub BASE=plane_s16       the arm to beat, by output folder: plane_s16 (the
 #                              16-epoch source arm, attach <plane>-16ep-source) or
-#                              plane_pseudo50 (attach <plane>-pseudo50). Once a
+#                              plane_pseudo50 (attach <plane>-pseudo50) or
+#                              plane_combo (attach <plane>-combo). Once a
 #                              change wins, the next one is judged against it.
 #
 # Bar, fixed in advance from the measured seed noise (2026-09-27): a five-fold
@@ -48,7 +49,7 @@ LABELFILE = "__LABELFILE__"
 FOLDS = "__FOLDS__"
 MAXMIN = int("__MAXMIN__")
 BASE = "__BASE__"
-assert BASE in ("plane_s16", "plane_pseudo50"), f"unknown BASE {BASE!r}"
+assert BASE in ("plane_s16", "plane_pseudo50", "plane_combo"), f"unknown BASE {BASE!r}"
 SLOT = {"sag": 0, "cor": 1, "ax": 2}[PLANE]
 assert FOLDS in ("all", "0"), f"FOLDS must be 'all' or '0', got {FOLDS!r}"
 BAR = 0.013 if FOLDS == "all" else 0.016
@@ -77,13 +78,16 @@ if not (lab and dino):
 cache = None
 # Find caches by their manifests. fastMRI caches (cell 46) carry the same folder
 # names, so the split decides which is the competition's and which is extra data.
-fm_dirs = []
+fm_dirs, oai_dirs = [], []
 for m in find(filename="cache_manifest.json"):
     d = os.path.dirname(m)
     if not d.endswith(f"cache_{PLANE}"):
         continue
-    if json.load(open(m)).get("split") == "fastmri":
+    split = json.load(open(m)).get("split")
+    if split == "fastmri":
         fm_dirs.append(d)
+    elif split == "oai":
+        oai_dirs.append(d)
     elif cache is None:
         cache = d
 if cache is None:
@@ -101,6 +105,20 @@ if fm_tok:
     EXTRA += ["--extra-labels", teach[0], "--extra-cache", *fm_dirs,
               "--extra-per-epoch", fm_tok[0].split(":", 1)[1]]
     print(f"fastMRI: {len(fm_dirs)} cache dir(s), labels {teach[0]}")
+# EXTRA may carry OAI:N -- the OAI baseline knees for this plane with MOAKS-derived
+# soft labels (src/oai_labels.py -> oai_labels.csv), N per epoch. One extra source
+# per run: train.py takes a single extra label table.
+oai_tok = [e for e in EXTRA if e.startswith("OAI:")]
+if oai_tok:
+    assert not fm_tok, "FASTMRI and OAI in one run: one extra source at a time"
+    EXTRA = [e for e in EXTRA if not e.startswith("OAI:")]
+    olab = find(filename="oai_labels.csv")
+    if not (olab and oai_dirs):
+        describe(); raise SystemExit("OAI: attach the OAI dataset (oai_labels.csv and "
+                                     f"cache_{PLANE} with split oai; {len(oai_dirs)} found)")
+    EXTRA += ["--extra-labels", olab[0], "--extra-cache", *oai_dirs,
+              "--extra-per-epoch", oai_tok[0].split(":", 1)[1]]
+    print(f"OAI: {len(oai_dirs)} cache dir(s), labels {olab[0]}")
 man = json.load(open(f"{cache}/cache_manifest.json"))
 if man.get("slots") != 1 or man.get("only_slot") != SLOT:
     raise SystemExit(f"cache_{PLANE} is not the one-sequence {PLANE} cache: {man}")
