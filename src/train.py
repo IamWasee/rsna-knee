@@ -887,7 +887,8 @@ def train_fold(args, tr: pd.DataFrame, va: pd.DataFrame, gold: pd.DataFrame,
     return best, best_oof
 
 
-def main() -> None:
+def make_parser() -> argparse.ArgumentParser:
+    """Every training flag; also used by notebooks that reuse build_labels and the folds."""
     ap = argparse.ArgumentParser()
     ap.add_argument("--cache", type=Path, required=True)
     ap.add_argument("--labels", type=Path, required=True, help="report-derived labels CSV")
@@ -979,7 +980,11 @@ def main() -> None:
     ap.add_argument("--avg-top", type=int, default=1, metavar="K",
                     help="save the average of the K best epochs' weights (by OOF) "
                          "instead of the single best; 1 keeps the old behaviour")
-    args = ap.parse_args()
+    return ap
+
+
+def main() -> None:
+    args = make_parser().parse_args()
     be = Backend(args.device)
 
     torch.manual_seed(args.seed)
