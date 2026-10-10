@@ -59,8 +59,10 @@ print(f"{len(derived)} labelled studies, {len(gold)} gold, {(time.time()-t00)/60
 
 # ---- encoder -----------------------------------------------------------
 REPO = "/kaggle/working/dinov3"
-!rm -rf $REPO && git clone -q --depth 1 https://github.com/facebookresearch/dinov3.git $REPO
-enc = torch.hub.load(REPO, "dinov3_vitl16", source="local", pretrained=False)
+!rm -rf $REPO && git clone -q https://github.com/facebookresearch/dinov3.git $REPO && git -C $REPO checkout -q 6876159
+sys.path.insert(0, REPO)
+from dinov3.hub.backbones import dinov3_vitl16      # not hubconf: it imports the detection/segmentation stacks
+enc = dinov3_vitl16(pretrained=False)
 ck = torch.load(wts[0], map_location="cpu", weights_only=False)
 print("checkpoint top-level keys:", list(ck)[:8] if isinstance(ck, dict) else type(ck))
 want = set(enc.state_dict())
@@ -90,13 +92,25 @@ if best_n < 0.95 * len(want):
     print("checkpoint examples:", sorted(best)[:10])
     raise SystemExit("OrthoFoundation weights do not map onto dinov3_vitl16")
 missing, unexpected = enc.load_state_dict({k: v for k, v in best.items() if k in want}, strict=False)
-print(f"loaded; missing {len(missing)} {missing[:5]}")
-enc = enc.half().eval().cuda()
+params = {n for n, _ in enc.named_parameters()}
+print(f"loaded; missing {len(missing)} {missing[:8]}")
+if set(missing) & params:
+    raise SystemExit(f"{len(set(missing) & params)} encoder PARAMETERS left at random init: "
+                     f"{sorted(set(missing) & params)[:10]}")
+left = sorted(k for k in best if k not in want and not k.startswith(("head", "dino_head", "ibot_head")))
+print(f"checkpoint keys not used: {len(left)} {left[:8]}")
+if any(k.startswith(("blocks.", "patch_embed", "norm", "cls_token", "storage_tokens", "rope")) for k in left):
+    raise SystemExit("backbone-looking checkpoint keys were not loaded")
+# fp32 weights + fp16 autocast: LayerNorm/softmax stay fp32 and the RoPE periods are not rounded
+enc = enc.float().eval().cuda()
 ngpu = torch.cuda.device_count()
 
 SIZE = 256          # 16 x 16 patches; the cache is 288 px
-MEAN = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1).cuda().half()
-STD = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1).cuda().half()
+MEAN = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1).cuda()
+STD = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1).cuda()
+for p, d in caches.items():
+    m = json.load(open(f"{d}/cache_manifest.json"))
+    assert m["size"] == 288 and m["n_slices"] == 24, (p, m)
 
 
 class Wrap(nn.Module):
@@ -128,10 +142,11 @@ for p in ("sag", "cor", "ax"):
             if not ok:
                 continue
             x = torch.from_numpy(np.stack([vols[k][0] for k in ok])).cuda()       # b,24,288,288
-            x = x.view(-1, 1, 288, 288).half().div(255)
+            x = x.view(-1, 1, 288, 288).float().div(255)
             x = F.interpolate(x, size=SIZE, mode="bilinear", align_corners=False).expand(-1, 3, -1, -1)
-            with torch.no_grad():
+            with torch.no_grad(), torch.autocast("cuda", dtype=torch.float16):
                 f = net((x - MEAN) / STD).float().view(len(ok), 24, -1)
+            assert torch.isfinite(f).all(), f"non-finite features, {p} batch at {s}"
             for j, k in enumerate(ok):
                 out[s + k] = f[j].cpu().numpy(); have[s + k] = True
             if s % 800 == 0:
