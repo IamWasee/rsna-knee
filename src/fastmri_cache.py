@@ -47,6 +47,10 @@ PLANES = [("Sagittal", "sag", 0), ("Coronal", "cor", 1), ("Axial", "ax", 2)]
 FAT_SAT = re.compile(r"(?<![A-Z])(FS|FAT\s*-?\s*SAT\w*|FATSAT|STIR|SPAIR|SPIR|TIRM|"
                      r"FS\s*PD|PD\s*FS|T2\s*FS|FS\s*T2|PDFS|T2FS|IDEAL\s*W|DIXON\s*W)"
                      r"(?![A-Z])")
+# "SAG PD FSE NON FAT SAT" names the suppression it does NOT use; seen in the
+# first fastMRI exams read, where it had been taken as fat-suppressed.
+NOT_FAT_SAT = re.compile(r"NON[\s_-]*(FAT|FS)|NO[\s_-]+(FAT|FS)(?![A-Z])|W/?O[\s_-]*(FAT|FS)|"
+                         r"WITHOUT[\s_-]*(FAT|FS)")
 SKIP = re.compile(r"LOC|SCOUT|SURVEY|CAL|ASSET|PLANE\s*LOC|3\s*PL", re.I)
 MIN_SLICES = 10          # below this a series is a localiser, not a stack
 FLUSH_AFTER = 400        # members from other studies before an open study is complete
@@ -68,6 +72,8 @@ def plane_of(iop) -> str | None:
 def is_fat_sat(ds) -> bool:
     desc = " ".join(str(getattr(ds, t, "") or "") for t in
                     ("SeriesDescription", "ProtocolName", "SequenceName")).upper()
+    if NOT_FAT_SAT.search(desc):
+        return False
     opts = getattr(ds, "ScanOptions", "") or ""
     opts = [opts] if isinstance(opts, str) else list(opts)
     return bool(FAT_SAT.search(desc)) or any(str(o).upper() in ("FS", "SFS", "FSA")
