@@ -23,10 +23,16 @@ import numpy as np, pandas as pd
 
 T0 = time.time()
 W = Path("/kaggle/working")
+# notebook outputs mount deep (/kaggle/input/notebooks/<owner>/<slug>/...); walk for receipt.json,
+# never descending into the competition's DICOM tree
 src = []
-for pat in ("/kaggle/input/*/snapshot/datasets/*/receipt.json", "/kaggle/input/*/*/snapshot/datasets/*/receipt.json",
-            "/kaggle/input/*/*/*/snapshot/datasets/*/receipt.json"):
-    src += [Path(p).parent for p in glob.glob(pat)]
+for root, dirs, files in os.walk("/kaggle/input"):
+    dirs[:] = [d for d in dirs if d not in ("competitions", "rsna-knee-abnormality-detection", "train_series",
+                                            "test_series", "cloud_code", "kneexnet")]
+    if root.count(os.sep) > 9:
+        dirs[:] = []
+    if "receipt.json" in files:
+        src.append(Path(root))
 src = [s for s in src if (s / "best.pt").is_file() and (s / "cloud_code").is_dir()]
 assert len(src) >= 1, "attach the snap-rsna-orthofoundation-fold0-epoch7-2026 output"
 SRC = src[0]
