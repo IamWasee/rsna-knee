@@ -26,7 +26,7 @@ W = Path("/kaggle/working")
 # notebook outputs mount deep (/kaggle/input/notebooks/<owner>/<slug>/...); walk for receipt.json,
 # never descending into the competition's DICOM tree
 src = []
-for root, dirs, files in os.walk("/kaggle/input"):
+for root, dirs, files in os.walk("/kaggle/input", followlinks=True):   # outputs mount as symlinks
     dirs[:] = [d for d in dirs if d not in ("competitions", "rsna-knee-abnormality-detection", "train_series",
                                             "test_series", "cloud_code", "kneexnet")]
     if root.count(os.sep) > 9:
