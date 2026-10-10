@@ -55,8 +55,11 @@ print("receipt hashes verified", f"{(time.time()-T0)/60:.1f} min")
 wheels = sorted(str(p) for p in SRC.rglob("*.whl"))
 if wheels:
     subprocess.run([sys.executable, "-m", "pip", "install", "-q", "--no-index", "--no-deps", *wheels], check=False)
-subprocess.run([sys.executable, "-m", "pip", "install", "-q", "monai", "segmentation-models-pytorch", "ultralytics",
-                "h5py", "psutil"], check=False, timeout=1200)
+# their environment pins timm 1.0.25 (DINOv3 ViTs); --no-deps so torch is not touched. MONAI is vendored.
+subprocess.run([sys.executable, "-m", "pip", "install", "-q", "--no-deps", "timm==1.0.25"], check=False, timeout=900)
+subprocess.run([sys.executable, "-m", "pip", "install", "-q", "h5py", "psutil"], check=False, timeout=900)
+print("timm", subprocess.run([sys.executable, "-c", "import timm; print(timm.__version__)"],
+                             capture_output=True, text=True).stdout.strip())
 
 # competition root
 COMP = next(Path(p).parent for p in ["/kaggle/input/competitions/rsna-knee-abnormality-detection/test.csv",
@@ -69,7 +72,7 @@ gold = train[train[LABELS].notna().all(axis=1)]
 print(f"{len(gold)} gold studies")
 
 # a test-shaped directory over the gold studies
-G = W / "golddata"; shutil.rmtree(G, ignore_errors=True); G.mkdir()
+G = Path("/tmp/golddata"); shutil.rmtree(G, ignore_errors=True); G.mkdir()
 test_cols = list(pd.read_csv(COMP / "test.csv", nrows=1).columns)
 gold[[c for c in test_cols if c in gold.columns]].to_csv(G / "test.csv", index=False)
 if (COMP / "test_series.csv").exists() and (COMP / "train_series.csv").exists():
@@ -96,7 +99,9 @@ def run(data, out, budget_s):
 
 
 from sklearn.metrics import roc_auc_score
-pred, secs = run(G, W / "helios_gold", 3 * 3600)
+# caches go to /tmp: full-resolution competition volumes must not land in the notebook output
+pred, secs = run(G, Path("/tmp/helios_gold"), 3 * 3600)
+print("gold native cache:", subprocess.run(["du", "-sh", "/tmp/helios_gold"], capture_output=True, text=True).stdout.strip())
 pred = pred.set_index("StudyInstanceUID").loc[gold["StudyInstanceUID"]]
 per = {c: roc_auc_score(gold[c].astype(int), pred[c]) for c in LABELS}
 print("\n" + "=" * 66)
@@ -107,14 +112,25 @@ for c, a in per.items():
 print("ours for reference: 9-arm team 0.9003 | sag-combo 0.8985")
 np.save(W / "helios_gold_pred.npy", pred[LABELS].values)
 gold[["StudyInstanceUID"]].to_csv(W / "helios_gold_ids.csv", index=False)
+shutil.rmtree("/tmp/helios_gold", ignore_errors=True)
+shutil.rmtree(G, ignore_errors=True)
 
-tpred, tsecs = run(COMP, W / "helios_test", 4 * 3600)
-tpred.to_csv(W / "helios_test.csv", index=False)
-print(f"\ntest: {len(tpred)} studies in {tsecs/60:.1f} min ({tsecs/max(1,len(tpred)):.1f} s/study)")
+# bf16 autocast on a T4 may be emulated: project the test run from the gold timing first
+n_test = len(pd.read_csv(COMP / "test.csv"))
+proj = secs / len(gold) * n_test
+print(f"projected test run: {proj/60:.0f} min for {n_test} studies")
+tsecs = None
+if proj > 0.8 * 4 * 3600:
+    print("SKIPPING test run: projection exceeds 80% of its 4 h budget")
+else:
+    tpred, tsecs = run(COMP, Path("/tmp/helios_test"), 4 * 3600)
+    test_ids = set(pd.read_csv(COMP / "test.csv", dtype={"StudyInstanceUID": str})["StudyInstanceUID"])
+    assert set(tpred["StudyInstanceUID"]) == test_ids and tpred["StudyInstanceUID"].is_unique, "test coverage"
+    tpred.to_csv(W / "helios_test.csv", index=False)
+    shutil.rmtree("/tmp/helios_test", ignore_errors=True)
+if tsecs:
+    print(f"\ntest: {len(tpred)} studies in {tsecs/60:.1f} min ({tsecs/max(1,len(tpred)):.1f} s/study)")
 json.dump({"gold_macro": float(np.mean(list(per.values()))), "gold_per_label": per,
-           "gold_seconds": secs, "test_seconds": tsecs, "test_rows": len(tpred)},
+           "gold_seconds": secs, "test_seconds": tsecs, "projected_test_seconds": proj},
           open(W / "helios_leg.json", "w"), indent=1)
-for d in ("golddata", "helios_gold", "helios_test"):
-    for f in (W / d).rglob("native_test_cache"):
-        shutil.rmtree(f, ignore_errors=True)
 print(f"total {(time.time()-T0)/60:.0f} min")
