@@ -38,9 +38,13 @@ AUG_INTENSITY = 0.10
 class KneeStudies(Dataset):
     def __init__(self, df: pd.DataFrame, cache: Path, train: bool = True,
                  slots: int = 4, n_slices: int = 9, size: int = 256,
-                 augment: bool = True, sample_groups: int = 0):
+                 augment: bool = True, sample_groups: int = 0,
+                 paths: dict | None = None):
         self.df = df.reset_index(drop=True)
         self.cache = Path(cache)
+        # Studies that live outside `cache` -- extra training data such as the
+        # fastMRI caches, spread over several notebooks' outputs -- by id.
+        self.paths = paths or {}
         self.train = train
         # Both default to exactly the behaviour every existing arm trained with.
         # augment=False switches off the rigid jitter and intensity scale, so their
@@ -60,7 +64,7 @@ class KneeStudies(Dataset):
         return len(self.df)
 
     def _load(self, study_id: str) -> np.ndarray:
-        path = self.cache / f"{study_id}.npy"
+        path = self.paths.get(study_id) or self.cache / f"{study_id}.npy"
         if not path.exists():
             # A missing study must not kill a 9-hour inference run.
             return np.zeros(self.shape, dtype=np.uint8)

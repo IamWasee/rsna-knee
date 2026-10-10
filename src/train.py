@@ -17,6 +17,7 @@ truth. Two consequences shape this file:
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 import time
 from pathlib import Path
@@ -28,7 +29,7 @@ from torch.utils.data import DataLoader
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from config import GOLD_PREVALENCE, ID_COL, LABELS  # noqa: E402
-from dataset import KneeStudies  # noqa: E402
+from dataset import CONF, KneeStudies  # noqa: E402
 from model import KneeModel, build_loss  # noqa: E402
 from paths import data_root  # noqa: E402
 
@@ -513,6 +514,68 @@ def build_labels(args) -> tuple[pd.DataFrame, pd.DataFrame]:
     return derived, gold
 
 
+def load_extra(args, derived: pd.DataFrame, gold: pd.DataFrame):
+    """Extra training studies with soft targets -- e.g. fastMRI read by our arms.
+
+    They join every fold's TRAINING set and nothing else: validation, OOF and the
+    gold 58 stay competition studies only, so every score keeps its meaning.
+    Their targets are teacher probabilities, used raw; rank-sharpening a table
+    that mixes report labels with probabilities has no defined meaning, so this
+    requires --sharpen-to none.
+    """
+    if not args.extra_labels:
+        return None, {}
+    if args.sharpen and args.sharpen_to != "none":
+        raise SystemExit("--extra-labels needs --sharpen-to none: the extra targets are "
+                         "probabilities and must not be rank-sharpened")
+    ex = pd.read_csv(args.extra_labels)
+    miss = [c for c in [ID_COL] + LABELS if c not in ex.columns]
+    if miss:
+        raise SystemExit(f"{args.extra_labels} lacks columns {miss}")
+    ex = ex[[ID_COL] + LABELS].drop_duplicates(ID_COL)
+    clash = set(ex[ID_COL]) & (set(derived[ID_COL]) | set(gold[ID_COL]))
+    if clash:
+        raise SystemExit(f"{len(clash)} extra ids are also competition studies")
+    paths = {}
+    for d in args.extra_cache or []:
+        for e in os.scandir(d):
+            if e.name.endswith(".npy"):
+                paths.setdefault(e.name[:-4], Path(e.path))
+    n0 = len(ex)
+    ex = ex[ex[ID_COL].isin(paths)].reset_index(drop=True)
+    ex[LABELS] = ex[LABELS].astype(float).clip(0.02, 0.98)
+    if ex.empty:
+        raise SystemExit(f"no extra study in {args.extra_labels} has a .npy in "
+                         f"{args.extra_cache}")
+    print(f"extra: {len(ex)} of {n0} studies cached across {len(args.extra_cache)} "
+          f"dir(s); {args.extra_per_epoch or len(ex)} per epoch, training only; "
+          f"mean target {ex[LABELS].values.mean():.3f}")
+    return ex, {k: paths[k] for k in ex[ID_COL]}
+
+
+class ExtraSampler(torch.utils.data.Sampler):
+    """Every main study each epoch, plus `per_epoch` extra ones drawn afresh.
+
+    Indices 0..n_main-1 are the competition studies, the rest the extra pool.
+    Drawing a new subset each epoch shows the whole pool over training without
+    letting it outnumber the competition data inside any one epoch.
+    """
+
+    def __init__(self, n_main: int, n_extra: int, per_epoch: int, seed: int):
+        self.n_main, self.n_extra = n_main, n_extra
+        self.per_epoch = min(per_epoch, n_extra) if per_epoch else n_extra
+        self.rng = np.random.default_rng(seed)
+
+    def __iter__(self):
+        extra = self.n_main + self.rng.choice(self.n_extra, self.per_epoch, replace=False)
+        idx = np.concatenate([np.arange(self.n_main), extra])
+        self.rng.shuffle(idx)
+        return iter(idx.tolist())
+
+    def __len__(self) -> int:
+        return self.n_main + self.per_epoch
+
+
 @torch.no_grad()
 def tta_views(x: torch.Tensor, n: int) -> list:
     """Identity plus small rotations and zooms -- no flips.
@@ -577,9 +640,22 @@ def train_fold(args, tr: pd.DataFrame, va: pd.DataFrame, gold: pd.DataFrame,
     if args.sample_groups and args.head not in ("shared", "topk", "gru"):
         raise SystemExit(f"--sample-groups needs a head that accepts a variable number "
                          f"of groups (shared, topk, gru); --head {args.head} fixes it")
-    tr_dl = DataLoader(KneeStudies(tr, train=True, augment=args.augment,
-                                   sample_groups=args.sample_groups, **ds_kw),
-                       batch_size=args.batch, shuffle=True, drop_last=True, **dl_kw)
+    extra, extra_paths = getattr(args, "_extra", (None, {}))
+    if extra is not None:
+        tr = pd.concat([tr, extra], ignore_index=True)
+        for c in CONF:                          # extra rows carry no confidence
+            if c in tr.columns:
+                tr[c] = tr[c].fillna(1.0)
+        sampler = ExtraSampler(len(tr) - len(extra), len(extra),
+                               args.extra_per_epoch, args.seed + fold)
+        tr_dl = DataLoader(KneeStudies(tr, train=True, augment=args.augment,
+                                       sample_groups=args.sample_groups,
+                                       paths=extra_paths, **ds_kw),
+                           batch_size=args.batch, sampler=sampler, drop_last=True, **dl_kw)
+    else:
+        tr_dl = DataLoader(KneeStudies(tr, train=True, augment=args.augment,
+                                       sample_groups=args.sample_groups, **ds_kw),
+                           batch_size=args.batch, shuffle=True, drop_last=True, **dl_kw)
     va_dl = DataLoader(KneeStudies(va, train=False, **ds_kw),
                        batch_size=args.batch, **dl_kw)
     gold_dl = DataLoader(KneeStudies(gold, train=False, **ds_kw),
@@ -868,6 +944,13 @@ def main() -> None:
     ap.add_argument("--no-pretrained", dest="pretrained", action="store_false")
     ap.add_argument("--no-sharpen", dest="sharpen", action="store_false",
                     help="train on raw ensemble scores (compressed toward 0.5)")
+    ap.add_argument("--extra-labels", type=Path, metavar="CSV",
+                    help="extra TRAINING studies with soft targets (id + 12 labels), "
+                         "e.g. fastMRI read by our arms; never validated or scored")
+    ap.add_argument("--extra-cache", type=Path, nargs="+", metavar="DIR",
+                    help="directories holding the extra studies' <id>.npy")
+    ap.add_argument("--extra-per-epoch", type=int, default=0, metavar="N",
+                    help="extra studies drawn afresh each epoch; 0 uses all of them")
     ap.add_argument("--mask-unaddressed", type=float, default=0.0, metavar="BAND",
                     help="zero the loss weight where |target-0.5| < BAND, i.e. where "
                          "the report never addressed the finding. Radiologists "
@@ -897,6 +980,7 @@ def main() -> None:
     print(f"backbone: {args.backbone}")
 
     derived, gold = build_labels(args)
+    args._extra = load_extra(args, derived, gold)
 
     # Two ways to cut the folds, and the difference between them IS the leakage.
     # Grouped is what we train on: scanner and duplicate-report groups never
