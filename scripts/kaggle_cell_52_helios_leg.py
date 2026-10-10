@@ -33,7 +33,7 @@ for root, dirs, files in os.walk("/kaggle/input", followlinks=True):   # outputs
         dirs[:] = []
     if "receipt.json" in files:
         src.append(Path(root))
-src = [s for s in src if (s / "best.pt").is_file() and (s / "cloud_code").is_dir()]
+src = [s for s in src if ((s / "best.pt").is_file() or (s / "weight_parts.json").is_file()) and (s / "cloud_code").is_dir()]
 if not src:
     for root, dirs, files in os.walk("/kaggle/input", followlinks=True):
         dirs[:] = [d for d in dirs if d not in ("competitions", "rsna-knee-abnormality-detection", "cloud_code")]
@@ -48,12 +48,25 @@ rec = json.loads((SRC / "receipt.json").read_text())
 print("checkpoint", SRC, {k: rec[k] for k in ("fold", "epoch_one_based", "weights", "validation_macro_auc_weak_reference")})
 
 # their code + assets in one writable place: infer.py looks for anatomy.pt next to the checkpoint
+import hashlib
 H = Path("/tmp/helios"); shutil.rmtree(H, ignore_errors=True); H.mkdir()
 shutil.copytree(SRC / "cloud_code", H / "cloud_code")
-for f in ("best.pt", "anatomy.pt"):
-    os.symlink(SRC / f, H / f)
+# the dataset now ships best.pt as 128 MB parts; rebuild it and check the assembled hash
+if (SRC / "best.pt").is_file():
+    os.symlink(SRC / "best.pt", H / "best.pt")
+else:
+    parts = json.loads((SRC / "weight_parts.json").read_text())
+    h = hashlib.sha256()
+    with open(H / "best.pt", "wb") as dst:
+        for part in parts["parts"]:
+            blob = (SRC / part["name"]).read_bytes()
+            assert len(blob) == part["bytes"] and hashlib.sha256(blob).hexdigest() == part["sha256"], part["name"]
+            dst.write(blob); h.update(blob)
+    assert h.hexdigest() == parts["assembled_sha256"] == rec["files"]["best.pt"]["sha256"], "assembled best.pt differs"
+    del blob
+    print("best.pt assembled from", len(parts["parts"]), "parts")
+os.symlink(SRC / "anatomy.pt", H / "anatomy.pt")
 os.symlink(SRC / "kneexnet", H / "kneexnet")
-import hashlib
 for name, meta in rec["files"].items():
     p = H / name if (H / name).exists() else (H / "cloud_code" / name)
     if name == "cloud_code.zip":
