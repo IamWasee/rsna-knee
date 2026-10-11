@@ -53,7 +53,8 @@ def fetch(planes: str = "sag", oai: bool = True) -> None:
         sh(f"cd {DATA}/comp && (unzip -o -q train.csv.zip && rm -f train.csv.zip || true)")
     for p in planes.split(","):
         d = f"{DATA}/k/cache-{p}"
-        if not os.path.exists(f"{d}/cache_{p}/cache_manifest.json"):
+        have = [os.path.join(r, "study_meta.csv") for r, _, fs in os.walk(d) if "cache_manifest.json" in fs]
+        if not (have and os.path.exists(have[0])):
             sh(f"kaggle kernels output {OWNER}/cache-{p} -p {d}", timeout=3 * 3600)
     if not os.path.exists(f"{DATA}/labels/labels_pseudo50.csv"):
         sh(f"kaggle datasets download {OWNER}/rsna-knee-labels-pseudo -p {DATA}/labels --unzip")
@@ -74,7 +75,9 @@ def fetch(planes: str = "sag", oai: bool = True) -> None:
     sh(f"du -sh {DATA}/* && ls {DATA}/k {DATA}/oai")
 
 
-@app.function(image=image, volumes={DATA: vol}, gpu="A100-80GB", timeout=12 * 3600)
+# 4 h cap on the whole call (about $10): the fold-0 screen needs ~1.5 h. Raise it deliberately
+# for more folds -- five need ~6 h, and a run killed by the cap loses the fold in progress.
+@app.function(image=image, volumes={DATA: vol}, gpu="A100-80GB", cpu=8, timeout=4 * 3600)
 def train(plane: str = "sag", fold: int = 0, oai: int = 0, hours: float = 3.0, tag: str = "of",
           unfreeze: int = 6, epochs: int = 16, batch: int = 8) -> None:
     import glob, json, os, subprocess, sys, time
@@ -84,6 +87,9 @@ def train(plane: str = "sag", fold: int = 0, oai: int = 0, hours: float = 3.0, t
     caches = glob.glob(f"{DATA}/k/cache-{plane}/**/cache_{plane}/cache_manifest.json", recursive=True)
     assert caches, f"run fetch first (no cache_{plane})"
     cache = os.path.dirname(caches[0])
+    # build_labels groups folds by scanner only with study_meta.csv; without it the folds change
+    # silently and fold 0 is no longer sag-combo's fold 0
+    assert os.path.exists(f"{cache}/study_meta.csv"), f"{cache}/study_meta.csv missing"
     man = json.load(open(caches[0]))
     out = f"{DATA}/runs/{tag}_{plane}" + (f"_f{fold}" if fold >= 0 else "")
     args = ["--cache", cache, "--labels", f"{DATA}/labels/labels_pseudo50.csv",
@@ -92,7 +98,7 @@ def train(plane: str = "sag", fold: int = 0, oai: int = 0, hours: float = 3.0, t
             "--folds", "5", "--head", "shared", "--pool", "focal", "--batch", str(batch),
             "--epochs", str(epochs), "--lr", "1e-3", "--lr-backbone", "3e-5",
             "--unfreeze-last", str(unfreeze), "--weight-decay", "0.02", "--sharpen-to", "none",
-            "--seed", "42", "--avg-top", "3", "--grad-checkpoint", "--out", out]
+            "--seed", "42", "--avg-top", "3", "--grad-checkpoint", "--workers", "6", "--out", out]
     if fold >= 0:
         args += ["--only-fold", str(fold)]
     if oai:
@@ -103,12 +109,17 @@ def train(plane: str = "sag", fold: int = 0, oai: int = 0, hours: float = 3.0, t
     env = dict(os.environ, RSNA_KNEE_DATA=f"{DATA}/comp", DINOV3_REPO="/opt/dinov3")
     print(torch.cuda.get_device_name(0), flush=True)
     t = time.time()
-    r = subprocess.run([sys.executable, "-u", "/opt/code/src/train.py", *args], env=env,
-                       timeout=int(hours * 3600))
-    vol.commit()
-    print(f"train.py exit {r.returncode} after {(time.time()-t)/60:.0f} min", flush=True)
+    code = None
+    try:
+        code = subprocess.run([sys.executable, "-u", "/opt/code/src/train.py", *args], env=env,
+                              timeout=int(hours * 3600)).returncode
+    except subprocess.TimeoutExpired:
+        print(f"train.py hit the {hours} h cap; keeping the folds it finished", flush=True)
+    finally:
+        vol.commit()          # whatever happened, finished fold checkpoints reach the volume
+    print(f"train.py exit {code} after {(time.time()-t)/60:.0f} min", flush=True)
     for p in sorted(glob.glob(f"{out}/fold*.pt")):
         ck = torch.load(p, map_location="cpu", weights_only=False)
         print(f"{os.path.basename(p)}: gold {ck.get('gold_auc', float('nan')):.4f}  "
               f"single {ck.get('single_gold_auc', float('nan')):.4f}  OOF {ck.get('oof_auc', float('nan')):.4f}")
-    assert r.returncode == 0, f"train.py exited {r.returncode}"
+    assert code == 0, f"train.py exited {code}"
