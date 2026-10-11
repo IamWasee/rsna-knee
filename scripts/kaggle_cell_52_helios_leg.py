@@ -108,6 +108,24 @@ if wheels:
 # their environment pins timm 1.0.25 (DINOv3 ViTs); --no-deps so torch is not touched. MONAI is vendored.
 subprocess.run([sys.executable, "-m", "pip", "install", "-q", "--no-deps", "timm==1.0.25"], check=False, timeout=900)
 subprocess.run([sys.executable, "-m", "pip", "install", "-q", "h5py", "psutil"], check=False, timeout=900)
+# their vendored ultralytics (kneexnet localizer) ships code only: every cfg/*.yaml is missing.
+# Take the same release's yaml files from PyPI and drop in only what is absent.
+VU = H / "cloud_code/training/vendor_runtime/kneexnet/ultralytics"
+if VU.is_dir() and not (VU / "cfg/default.yaml").exists():
+    ver = next(l.split('"')[1] for l in (VU / "__init__.py").read_text().splitlines() if l.startswith("__version__"))
+    tmpu = Path("/tmp/ultra_src"); shutil.rmtree(tmpu, ignore_errors=True)
+    r = subprocess.run([sys.executable, "-m", "pip", "install", "-q", "--no-deps", "--target", str(tmpu),
+                        f"ultralytics=={ver}"], timeout=900)
+    if r.returncode:
+        subprocess.run([sys.executable, "-m", "pip", "install", "-q", "--no-deps", "--target", str(tmpu),
+                        "ultralytics"], check=True, timeout=900)
+    added = 0
+    for y in (tmpu / "ultralytics").rglob("*.yaml"):
+        dst = VU / y.relative_to(tmpu / "ultralytics")
+        if not dst.exists():
+            dst.parent.mkdir(parents=True, exist_ok=True); shutil.copy(y, dst); added += 1
+    assert (VU / "cfg/default.yaml").exists(), "ultralytics cfg still missing"
+    print(f"vendored ultralytics {ver}: added {added} missing yaml files")
 print("timm", subprocess.run([sys.executable, "-c", "import timm; print(timm.__version__)"],
                              capture_output=True, text=True).stdout.strip())
 
