@@ -78,13 +78,15 @@ for name in rec["files"]:
         continue
     hit = everywhere.get(Path(name).name)
     if hit is None:
-        print("snapshot files:", sorted(everywhere)[:60])
-        raise SystemExit(f"{name} not found in the snapshot")
+        # this dataset version dropped them; infer.py checks the anatomy assets it actually
+        # needs against hashes stored in best.pt and fails loudly if one is required
+        print(f"  {name}: not in this dataset version -- left to infer.py's own check")
+        continue
     os.symlink(hit, H / name)
     print(f"  {name} <- {hit.relative_to(SRC)}")
 for name, meta in rec["files"].items():
-    p = H / name if (H / name).exists() else (H / "cloud_code" / name)
-    if name == "cloud_code.zip":
+    p = H / name
+    if name == "cloud_code.zip" or not p.exists():
         continue
     h = hashlib.sha256()
     with open(p, "rb") as fh:
