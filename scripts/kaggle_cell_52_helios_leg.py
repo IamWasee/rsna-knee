@@ -65,8 +65,23 @@ else:
     assert h.hexdigest() == parts["assembled_sha256"] == rec["files"]["best.pt"]["sha256"], "assembled best.pt differs"
     del blob
     print("best.pt assembled from", len(parts["parts"]), "parts")
-os.symlink(SRC / "anatomy.pt", H / "anatomy.pt")
-os.symlink(SRC / "kneexnet", H / "kneexnet")
+# the helper weights may sit anywhere in this dataset version: place each receipt file by
+# name where infer.py looks (next to best.pt; kneexnet/ beside it)
+(H / "kneexnet").mkdir()
+everywhere = {}
+for root, dirs, files in os.walk(SRC, followlinks=True):
+    dirs[:] = [d for d in dirs if d not in ("cloud_code", "dependencies")]
+    for f in files:
+        everywhere.setdefault(f, Path(root) / f)
+for name in rec["files"]:
+    if name in ("best.pt", "cloud_code.zip"):
+        continue
+    hit = everywhere.get(Path(name).name)
+    if hit is None:
+        print("snapshot files:", sorted(everywhere)[:60])
+        raise SystemExit(f"{name} not found in the snapshot")
+    os.symlink(hit, H / name)
+    print(f"  {name} <- {hit.relative_to(SRC)}")
 for name, meta in rec["files"].items():
     p = H / name if (H / name).exists() else (H / "cloud_code" / name)
     if name == "cloud_code.zip":
