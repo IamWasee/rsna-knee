@@ -130,8 +130,9 @@ def load_orthofoundation(enc: nn.Module, path: str) -> None:
 
     best, n_best = {}, -1
     for sd in dicts(ck):
-        for pre in ("", "backbone.", "module.", "module.backbone.", "teacher.backbone.",
-                    "student.backbone.", "teacher.", "student.", "encoder."):
+        # any nesting: the prefix is whatever precedes the backbone's own cls_token key
+        pres = {k[: -len("cls_token")] for k in sd if k.endswith("cls_token")} | {""}
+        for pre in sorted(pres):
             m = {k[len(pre):]: v for k, v in sd.items() if k.startswith(pre)}
             if len(want & set(m)) > n_best:
                 best, n_best = m, len(want & set(m))

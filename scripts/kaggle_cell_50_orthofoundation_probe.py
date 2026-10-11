@@ -93,8 +93,9 @@ else:
 
     best, best_n = None, -1
     for path, sd in candidates(ck):
-        for pre in ("", "backbone.", "module.", "module.backbone.", "teacher.backbone.", "student.backbone.",
-                    "teacher.", "student.", "encoder."):
+        # any nesting: the prefix is whatever precedes the backbone's own cls_token key
+        pres = {k[: -len("cls_token")] for k in sd if k.endswith("cls_token")} | {""}
+        for pre in sorted(pres):
             m = {k[len(pre):]: v for k, v in sd.items() if k.startswith(pre)}
             n = len(want & set(m))
             if n > best_n:
