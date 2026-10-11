@@ -68,11 +68,15 @@ else:
 # the helper weights may sit anywhere in this dataset version: place each receipt file by
 # name where infer.py looks (next to best.pt; kneexnet/ beside it)
 (H / "kneexnet").mkdir()
+# kneexnet/* left heliosli's dataset; our snap-kneexnet-* copies of the upstream files
+# (github pitthexai/Knee_MRI_Segmentation_2.5D) supply them, hash-checked against the receipt below
 everywhere = {}
-for root, dirs, files in os.walk(SRC, followlinks=True):
-    dirs[:] = [d for d in dirs if d not in ("cloud_code", "dependencies")]
-    for f in files:
-        everywhere.setdefault(f, Path(root) / f)
+for base in [SRC] + [Path(r) for r, _, fs in os.walk("/kaggle/input/notebooks", followlinks=True)
+                     if "snapshot_manifest.json" in fs]:
+    for root, dirs, files in os.walk(base, followlinks=True):
+        dirs[:] = [d for d in dirs if d not in ("cloud_code", "dependencies")]
+        for f in files:
+            everywhere.setdefault(f, Path(root) / f)
 for name in rec["files"]:
     if name in ("best.pt", "cloud_code.zip"):
         continue
