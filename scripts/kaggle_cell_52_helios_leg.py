@@ -71,12 +71,12 @@ else:
 # kneexnet/* left heliosli's dataset; our snap-kneexnet-* copies of the upstream files
 # (github pitthexai/Knee_MRI_Segmentation_2.5D) supply them, hash-checked against the receipt below
 everywhere = {}
-for base in [SRC] + [Path(r) for r, _, fs in os.walk("/kaggle/input/notebooks", followlinks=True)
-                     if "snapshot_manifest.json" in fs]:
-    for root, dirs, files in os.walk(base, followlinks=True):
-        dirs[:] = [d for d in dirs if d not in ("cloud_code", "dependencies")]
-        for f in files:
-            everywhere.setdefault(f, Path(root) / f)
+for root, dirs, files in os.walk("/kaggle/input", followlinks=True):
+    dirs[:] = [d for d in dirs if d not in ("competitions", "rsna-knee-abnormality-detection", "train_series",
+                                            "test_series", "cloud_code", "dependencies")]
+    for f in files:
+        everywhere.setdefault(f, Path(root) / f)
+print("helper files seen:", {k: str(v) for k, v in everywhere.items() if k.endswith((".pt", ".pth"))})
 for name in rec["files"]:
     if name in ("best.pt", "cloud_code.zip"):
         continue
