@@ -31,11 +31,13 @@ os.makedirs(OUT, exist_ok=True)
 
 
 def find_leg(name):
-    for pat in (f"/kaggle/input/hybrid-legs/{name}.ipynb", f"/kaggle/input/datasets/*/hybrid-legs/{name}.ipynb",
-                f"/kaggle/input/*/{name}.ipynb"):
-        hits = glob.glob(pat)
-        if hits:
-            return hits[0]
+    # Inputs mount at several depths and as symlinks (datasets/<owner>/<slug>, notebooks/...):
+    # walk with followlinks, never into the competition's DICOM tree.
+    for root, dirs, files in os.walk("/kaggle/input", followlinks=True):
+        dirs[:] = [d for d in dirs if d not in ("competitions", "rsna-knee-abnormality-detection",
+                                                "train_series", "test_series")]
+        if f"{name}.ipynb" in files:
+            return os.path.join(root, f"{name}.ipynb")
     raise FileNotFoundError(f"{name}.ipynb: attach abdullahwasee/hybrid-legs")
 
 
