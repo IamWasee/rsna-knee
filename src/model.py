@@ -96,6 +96,97 @@ class ViTBackbone(nn.Module):
         return fmap
 
 
+class _Ckpt(nn.Module):
+    """Run one transformer block under activation checkpointing."""
+
+    def __init__(self, blk: nn.Module):
+        super().__init__()
+        self.blk = blk
+
+    def forward(self, *a, **k):
+        from torch.utils.checkpoint import checkpoint
+        if self.training and torch.is_grad_enabled():
+            return checkpoint(self.blk, *a, use_reentrant=False, **k)
+        return self.blk(*a, **k)
+
+
+def load_orthofoundation(enc: nn.Module, path: str) -> None:
+    """Load an OrthoFoundation checkpoint onto a DINOv3 ViT-L/16, failing loudly.
+
+    The released files nest the backbone under a prefix ("backbone." in
+    OrthoFoundation-L); every nested tensor dict and common prefix is tried, and a
+    single encoder parameter left at its random init stops the load.
+    """
+    ck = torch.load(path, map_location="cpu", weights_only=False)
+    want = set(enc.state_dict())
+
+    def dicts(obj):
+        if isinstance(obj, dict):
+            if obj and all(torch.is_tensor(v) for v in obj.values()):
+                yield obj
+            for v in obj.values():
+                if isinstance(v, dict):
+                    yield from dicts(v)
+
+    best, n_best = {}, -1
+    for sd in dicts(ck):
+        for pre in ("", "backbone.", "module.", "module.backbone.", "teacher.backbone.",
+                    "student.backbone.", "teacher.", "student.", "encoder."):
+            m = {k[len(pre):]: v for k, v in sd.items() if k.startswith(pre)}
+            if len(want & set(m)) > n_best:
+                best, n_best = m, len(want & set(m))
+    missing, _ = enc.load_state_dict({k: v for k, v in best.items() if k in want}, strict=False)
+    params = {n for n, _ in enc.named_parameters()}
+    if n_best < 0.95 * len(want) or set(missing) & params:
+        raise SystemExit(f"OrthoFoundation weights do not fit dinov3_vitl16: {n_best}/{len(want)} keys, "
+                         f"unloaded params {sorted(set(missing) & params)[:5]}")
+
+
+class OrthoBackbone(nn.Module):
+    """OrthoFoundation (DINOv3 ViT-L/16, knee-pretrained) in ViTBackbone's place.
+
+    "ortho:<checkpoint.pth>"; the DINOv3 code comes from DINOV3_REPO (a checkout of
+    facebookresearch/dinov3). Same contract as ViTBackbone: (B, C, h, w) patch map,
+    CLS kept in self._cls, only the last `unfreeze_last` blocks and the final norm
+    trainable.
+    """
+
+    def __init__(self, path: str, unfreeze_last: int = 6, grad_checkpoint: bool = False):
+        super().__init__()
+        import os as _os, sys as _sys
+        repo = _os.environ.get("DINOV3_REPO", "/opt/dinov3")
+        if repo not in _sys.path:
+            _sys.path.insert(0, repo)
+        from dinov3.hub.backbones import dinov3_vitl16
+        self.net = dinov3_vitl16(pretrained=False)
+        load_orthofoundation(self.net, path)
+        n = len(self.net.blocks)
+        for prm in self.net.parameters():
+            prm.requires_grad = False
+        for i in range(max(0, n - unfreeze_last), n):
+            for prm in self.net.blocks[i].parameters():
+                prm.requires_grad = True
+            if grad_checkpoint:
+                self.net.blocks[i] = _Ckpt(self.net.blocks[i])
+        for prm in self.net.norm.parameters():
+            prm.requires_grad = True
+        self.num_features = self.net.embed_dim
+        self.patch = 16
+        trainable = sum(p.numel() for p in self.net.parameters() if p.requires_grad)
+        print(f"backbone: OrthoFoundation {n} blocks, last {unfreeze_last} trainable "
+              f"({trainable / 1e6:.1f}M params), dim {self.num_features}")
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        o = self.net.forward_features(x)
+        tok = o["x_norm_patchtokens"]                         # (N, P, D)
+        n, p, d = tok.shape
+        g = int(p ** 0.5)
+        self._cls = o["x_norm_clstoken"]
+        if g * g != p:
+            return tok.transpose(1, 2).unsqueeze(-1)
+        return tok.transpose(1, 2).reshape(n, d, g, g)
+
+
 class FocalPool(nn.Module):
     """Mean plus the upper tail of each channel over the spatial grid.
 
@@ -233,9 +324,11 @@ class KneeModel(nn.Module):
         self.n_slot, self.groups = n_slot, groups_per_slot
         self.encoder_chunk = encoder_chunk
         self.head_kind, self.pool_kind = head, pool
-        self.is_vit = backbone.startswith("dinov2:")
+        self.is_vit = backbone.startswith(("dinov2:", "ortho:"))
 
-        if self.is_vit:
+        if backbone.startswith("ortho:"):
+            self.encoder = OrthoBackbone(backbone.split(":", 1)[1], unfreeze_last, grad_checkpoint)
+        elif self.is_vit:
             # "dinov2:/kaggle/input/models/metaresearch/dinov2/pytorch/small/1"
             self.encoder = ViTBackbone(backbone.split(":", 1)[1], unfreeze_last,
                                        grad_checkpoint)
