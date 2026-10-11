@@ -79,13 +79,17 @@ def convert(job: tuple) -> dict:
         if dest.exists():
             row["status"] = "cached"
             return row
-        vol, side, _ = load_slot(tmp, size, crop_mm, anchors, plane=plane,
-                                 normalise_side=True, band=band)
+        # The side comes from the description, not the header: load_slot's own
+        # series_side() reads the Laterality tag or the image offset, and OAI's centred
+        # knee coil leaves both empty, so right knees went unmirrored (critic, 2026-10-11).
+        from preprocess import series_side
+        hdr = series_side(head)
+        vol, side, _ = load_slot(tmp, size, crop_mm, anchors, plane=plane, normalise_side=True,
+                                 band=band, side_override=mt.group(2)[0])
         if not vol.any():
             row["status"] = "blank"
             return row
-        # the description names the knee; a disagreeing header side is worth knowing
-        row["status"] = "ok" if side in (None, mt.group(2)[0]) else f"ok side-mismatch {side}"
+        row["status"] = f"ok header-side {hdr or 'none'}"
         np.save(dest, vol[None])
         return row
     except Exception as e:

@@ -187,7 +187,8 @@ def crop_resize(arr: np.ndarray, spacing: float, size: int, crop_mm: float) -> n
 def load_slot(series_dir: Path, size: int, crop_mm: float,
               n_anchors: int = N_ANCHORS, plane: str = "",
               normalise_side: bool = True,
-              band: tuple = (0.15, 0.85)) -> tuple[np.ndarray, str | None, str]:
+              band: tuple = (0.15, 0.85),
+              side_override: str | None = None) -> tuple[np.ndarray, str | None, str]:
     """n_anchors anchors across the joint, GROUP adjacent slices at each.
 
     Returns the volume, the detected side, and the scanner fingerprint.
@@ -217,6 +218,10 @@ def load_slot(series_dir: Path, size: int, crop_mm: float,
         side, fp = series_side(head), scanner_fingerprint(head)
     except Exception:
         pass
+    # A caller that knows the side from elsewhere (OAI names it in the series
+    # description) overrides the header: a centred knee coil gives no geometric hint.
+    if side_override in ("L", "R"):
+        side = side_override
 
     flip_lr = normalise_side and side == "R" and plane in ("Coronal", "Axial")
     if normalise_side and side == "R" and plane == "Sagittal":
