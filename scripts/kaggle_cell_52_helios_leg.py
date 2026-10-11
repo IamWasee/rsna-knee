@@ -86,8 +86,10 @@ for name in rec["files"]:
         # needs against hashes stored in best.pt and fails loudly if one is required
         print(f"  {name}: not in this dataset version -- left to infer.py's own check")
         continue
-    os.symlink(hit, H / name)
-    print(f"  {name} <- {hit.relative_to(SRC)}")
+    # a real copy, not a link: their anatomy code resolve()s the weights path and then
+    # looks for kneexnet/ beside the RESOLVED file, i.e. back in the read-only input
+    shutil.copy(hit, H / name)
+    print(f"  {name} <- {hit}")
 for name, meta in rec["files"].items():
     p = H / name
     if name == "cloud_code.zip" or not p.exists():
